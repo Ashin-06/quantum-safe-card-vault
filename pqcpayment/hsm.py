@@ -1,6 +1,8 @@
 """
-Crypto-Agile Post-Quantum HSM Vault, DUKPT-Style Per-Transaction Key Derivation,
-and Zero-Downtime Epoch Key Rotation Engine with Tamper-Evident Hash-Chained Audit Log.
+Software model of a card vault: FF1 tokens, hybrid-KEM envelopes, DUKPT-style
+per-transaction keys, epoch key rotation and an HMAC-chained audit log.
+
+Despite the class name this is not an HSM: every key lives in Python process memory.
 """
 
 from __future__ import annotations
@@ -44,17 +46,18 @@ class DUKPTTransactionKey:
 
 class DUKPTKeyEngine:
     """
-    ANSI X9.24-inspired Derived Unique Key Per Transaction (DUKPT) Engine.
+    DUKPT-style key derivation, modelled on ANSI X9.24 but not compatible with it
+    (X9.24-3 AES DUKPT uses AES-based derivation; this uses HMAC-SHA256).
 
     Given a 32-byte Base Derivation Key (BDK) and a 10-byte (20-hex-char) Key
     Serial Number (KSN = 59-bit IKSN device prefix || 21-bit transaction counter):
-      1. Derives the Initial PIN/PAN Encryption Key (IPEK) from BDK and IKSN.
-      2. Traverses the 21-bit binary derivation tree by iteratively masking each
-         set bit of the counter from MSB (bit 20) to LSB (bit 0) through a
-         non-reversible one-way PRF (HMAC-SHA256).
-      3. Derives domain-separated per-transaction FPE, MAC, and DEK subkeys.
-    Compromising any single transaction's working key reveals zero information
-    about the BDK, IPEK, or past/future transaction keys.
+      1. Derives the initial key (IPEK) from BDK and IKSN.
+      2. Walks the 21-bit derivation tree, one HMAC-SHA256 step per set bit of the
+         counter from bit 20 down to bit 0.
+      3. Derives separate FPE, MAC and DEK subkeys from the result.
+    A transaction key doesn't reveal the BDK, the IPEK or its ancestors, but it does give
+    every key below it in the tree (counter 4's key derives counter 5's). Real DUKPT devices
+    erase keys as they go to limit that; nothing here models the device side.
     """
 
     @staticmethod
@@ -177,11 +180,11 @@ class AuditLogEntry:
 
 class QuantumSafeHSMVault:
     """
-    Post-Quantum Payment Card Vault combining:
-      1. Bijective Luhn-Preserving FF1-Feistel Tokenization
-      2. Module-LWE + X25519 Hybrid PQC-KEM Envelope Wrapping
-      3. DUKPT Per-Transaction Key Derivation
-      4. Zero-Downtime Epoch Key Rotation with Hash-Chained Audit Log
+    In-memory card vault combining:
+      1. Luhn-preserving FF1 tokens (one tweak per epoch and merchant)
+      2. Hybrid Module-LWE + X25519 KEM envelopes holding the PAN
+      3. DUKPT-style per-transaction keys (the MAC they produce is stored, not checked)
+      4. Epoch key rotation that keeps earlier tokens working, with an HMAC-chained audit log
     """
 
     def __init__(self, initial_seed: Optional[bytes] = None) -> None:
@@ -432,12 +435,12 @@ class QuantumSafeHSMVault:
 
     def rotate_epoch(self, reason: str = "Scheduled Zero-Downtime PQC Key Rotation") -> Dict[str, object]:
         """
-        Perform Zero-Downtime HSM Key Rotation from Epoch E to Epoch E+1:
-          1. Mark Epoch E as RETIRED_READONLY.
-          2. Provision Epoch E+1 (new Module-LWE + X25519 HybridKeyPair, FF1 Master Key, BDK).
-          3. Re-wrap all vault records from Epoch E to Epoch E+1 without exposing PANs
-             outside the HSM boundary, while preserving legacy tokens in `records_by_token`
-             so in-flight settlements on Epoch E tokens never fail.
+        Rotate from epoch E to E+1:
+          1. Mark epoch E as RETIRED_READONLY (its keys are kept, since legacy tokens need them).
+          2. Create epoch E+1 keys (KEM keypair, FF1 key, BDK).
+          3. Decrypt every record and re-wrap it under E+1 with a new token, keeping the old
+             token as a legacy alias so tokens issued before the rotation still resolve.
+        Runs synchronously over every record: the vault is busy for the duration.
         """
         t0 = time.perf_counter()
         old_epoch = self.active_epoch

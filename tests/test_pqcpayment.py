@@ -188,6 +188,14 @@ def test_dukpt_key_isolation_and_hsm_zero_downtime_rotation() -> None:
     assert rot["rewrapped_records"] == 2
     assert rot["audit_chain_valid"] is True
 
+    # A transaction key derives the keys below it in the tree (4 -> 5), not above (5 -> 4)
+    bdk = vault.epochs[1].bdk
+    ksn4 = DUKPTKeyEngine.format_ksn("FFFF987654", 4)
+    ksn5 = DUKPTKeyEngine.format_ksn("FFFF987654", 5)
+    k4 = bytes.fromhex(DUKPTKeyEngine.derive_transaction_key(bdk, ksn4).working_key_hex)
+    k5 = DUKPTKeyEngine.derive_transaction_key(bdk, ksn5).working_key_hex
+    assert DUKPTKeyEngine._non_reversible_step(k4, int(ksn5, 16)).hex() == k5
+
     # Verify zero-downtime backward compatibility on Epoch 1 tokens
     assert vault.detokenize(tok1_epoch1, merchant_id="MERCH-01")["pan"] == pan1
     assert vault.detokenize(tok2_epoch1, merchant_id="MERCH-01")["pan"] == pan2
