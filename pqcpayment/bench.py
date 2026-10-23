@@ -11,6 +11,7 @@ Comprehensive Benchmark & Cryptographic Verification Suite for pqcpayment:
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import time
 from typing import Dict
@@ -41,7 +42,7 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
     t_start = time.perf_counter()
 
     # 1. Bijective Luhn-Preserving FF1-Feistel Benchmark over `num_pans` cards
-    fpe_key = hashlib.sha256(b"BENCHMARK-FF1-KEY-2026").digest()
+    fpe_key = os.urandom(32)
     cipher = FF1Radix10Cipher(fpe_key)
     tweak = "EPOCH:1|MERCH:BENCH-SWITCH-01"
 
@@ -76,7 +77,7 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
     kem_success = 0
     cca2_rejections = 0
 
-    kp = HybridPQCKEM.keygen(seed=b"BENCHMARK-HYBRID-KEM-SEED-2026" * 3)
+    kp = HybridPQCKEM.keygen()
     for trial in range(kem_trials):
         coins = hashlib.sha256(f"KEM-TRIAL-{trial}".encode("utf-8")).digest()
         ct, ss_enc, _ = HybridPQCKEM.encapsulate(kp.public_key, coins=coins)

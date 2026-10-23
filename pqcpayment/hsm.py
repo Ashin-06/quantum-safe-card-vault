@@ -184,7 +184,9 @@ class QuantumSafeHSMVault:
     """
 
     def __init__(self, initial_seed: Optional[bytes] = None) -> None:
-        self._seed = initial_seed or hashlib.sha256(b"PQCPAYMENT-HSM-GENESIS-SEED-2026").digest()
+        # initial_seed makes every key reproducible, for tests only. Without it each epoch
+        # gets fresh random keys, so one epoch's keys say nothing about another's.
+        self._seed = initial_seed
         self.epochs: Dict[int, EpochKeyBundle] = {}
         self.active_epoch: int = 0
         self.tx_counter: int = 0
@@ -222,9 +224,10 @@ class QuantumSafeHSMVault:
         return entry
 
     def _initialize_epoch(self, epoch_num: int, reason: str) -> EpochKeyBundle:
-        epoch_seed = hashlib.sha3_512(
-            self._seed + struct.pack(">I", epoch_num) + reason.encode("utf-8")
-        ).digest()
+        if self._seed is None:
+            epoch_seed = os.urandom(64)
+        else:
+            epoch_seed = hashlib.sha3_512(self._seed + struct.pack(">I", epoch_num)).digest()
         hybrid_kp = HybridPQCKEM.keygen(seed=epoch_seed)
         fpe_key = hashlib.sha256(b"EPOCH-FPE-MASTER:" + epoch_seed).digest()
         bdk = hashlib.sha256(b"EPOCH-DUKPT-BDK:" + epoch_seed).digest()

@@ -183,6 +183,20 @@ def test_dukpt_key_isolation_and_hsm_zero_downtime_rotation() -> None:
     assert vault.detokenize(tok2_epoch1, merchant_id="MERCH-01")["pan"] == pan2
 
 
+def test_vault_keys_are_random_unless_seeded() -> None:
+    pan = generate_luhn_pan("453201", 100001)
+    tokens = {QuantumSafeHSMVault().tokenize(pan, merchant_id="M")["token"] for _ in range(3)}
+    assert len(tokens) == 3  # unseeded vaults don't share keys
+
+    seeded = [QuantumSafeHSMVault(initial_seed=b"test-seed").tokenize(pan, merchant_id="M")["token"] for _ in range(2)]
+    assert seeded[0] == seeded[1]
+
+    vault = QuantumSafeHSMVault()
+    vault.rotate_epoch()
+    assert vault.epochs[1].fpe_master_key != vault.epochs[2].fpe_master_key
+    assert vault.epochs[1].bdk != vault.epochs[2].bdk
+
+
 def test_1000_pan_benchmark_invariants() -> None:
     report = run_benchmark(num_pans=1000, kem_trials=25)
     assert report["all_invariants_passed"] is True
