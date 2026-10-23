@@ -281,8 +281,7 @@ class QuantumSafeHSMVault:
         dukpt_tx = DUKPTKeyEngine.derive_transaction_key(bundle.bdk, ksn)
 
         tweak = self._build_tweak(bundle.epoch, merchant_id)
-        trace_info = bundle.fpe_cipher.encrypt_pan_with_trace(clean_pan, tweak=tweak)
-        token = str(trace_info["token"])
+        token = bundle.fpe_cipher.encrypt_pan(clean_pan, tweak=tweak)
 
         # Seal PAN + metadata inside Hybrid PQC-KEM + AES-256-GCM envelope
         aad = self._build_aad(bundle.epoch, merchant_id, ksn)
@@ -359,7 +358,6 @@ class QuantumSafeHSMVault:
                     HybridPQCKEM.keygen(seed=b"0" * 64).public_key.to_bytes()
                 ),
             },
-            "feistel_trace": trace_info["rounds"],
             "latency_ms": round(elapsed_ms, 3),
         }
 

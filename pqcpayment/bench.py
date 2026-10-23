@@ -42,7 +42,7 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
 
     # 1. Bijective Luhn-Preserving FF1-Feistel Benchmark over `num_pans` cards
     fpe_key = hashlib.sha256(b"BENCHMARK-FF1-KEY-2026").digest()
-    cipher = FF1Radix10Cipher(fpe_key, rounds=10)
+    cipher = FF1Radix10Cipher(fpe_key)
     tweak = "EPOCH:1|MERCH:BENCH-SWITCH-01"
 
     input_pans = []

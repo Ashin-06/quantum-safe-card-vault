@@ -1,40 +1,23 @@
 """
-Radix-10 Format-Preserving Encryption (FF1 / Balanced Feistel Network with Tweak)
-& Bijective Luhn-Preserving Payment Card Tokenization.
+Format-preserving card tokenization with FF1 (NIST SP 800-38G Rev. 1).
 
-Mathematical Bijection Guarantee:
----------------------------------
-Every 16-digit Luhn-valid Primary Account Number (PAN) has the structure:
-    PAN = BIN (6 digits) || AccountPayload (9 digits) || LuhnCheck (1 digit)
+`FF1` implements Algorithms 7 and 8 of SP 800-38G Rev. 1 over AES, for radix 2-36,
+and is checked against all nine NIST sample vectors in the tests. It is a reference
+implementation in Python: not constant-time and not reviewed.
 
-Because the original PAN is Luhn-valid, its 16th digit is a deterministic
-function of its first 15 digits:
-    PAN[15] = LuhnCheck(PAN[0:15])
-
-Therefore, encrypting the middle 9 digits PAN[6:15] bijectively via a 10-round
-Luby-Rackoff Feistel network over Z_{10^4} x Z_{10^5} (keyed by AES-256 +
-HMAC-SHA256 with the 6-digit BIN and merchant/epoch tweak) and recomputing the
-Luhn check digit for the 16th position of the token guarantees that:
-  1. Every output token is a 100% Luhn-valid 16-digit card number with the
-     exact same 6-digit issuer BIN (drop-in compatible with legacy ISO 8583 switches).
-  2. Decryption strips the token's Luhn check digit, runs the inverse 10-round
-     Feistel network on token[6:15], and recomputes the original PAN's Luhn
-     check digit — achieving a 100% exact, collision-free bijection over all
-     10^9 Luhn-valid cards per BIN.
+Card tokens:
+    PAN = BIN (6 digits) || account digits (9) || Luhn check digit (1)
+The 9 account digits are encrypted with FF1 (radix 10, AES-256) under the tweak
+"BIN:<bin>|TWEAK:<tweak>", and the check digit is recomputed. So for a fixed BIN and
+tweak, tokenization is a permutation of the 10^9 Luhn-valid PANs with that BIN: every
+token is a Luhn-valid 16-digit number with the same BIN, and decryption is exact.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import struct
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
-
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-MOD_LEFT = 10_000    # 10^4 (4 digits: 0000..9999)
-MOD_RIGHT = 100_000  # 10^5 (5 digits: 00000..99999)
+ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
 def compute_luhn_check_digit(first_15_digits: str) -> str:
@@ -97,102 +80,92 @@ def detect_card_network(pan: str) -> str:
     return "ISO8583_GENERIC"
 
 
-@dataclass(frozen=True)
-class FeistelRoundTrace:
-    round_index: int
-    left_4: str
-    right_5: str
-    prf_output: int
+class FF1:
+    """NIST SP 800-38G Rev. 1 FF1 with AES-128/192/256, radix 2..36, alphabet 0-9a-z."""
+
+    def __init__(self, key: bytes, radix: int = 10) -> None:
+        if len(key) not in (16, 24, 32):
+            raise ValueError("FF1 key must be 16, 24 or 32 bytes")
+        if not 2 <= radix <= len(ALPHABET):
+            raise ValueError("radix must be between 2 and 36")
+        self._key = bytes(key)
+        self.radix = radix
+
+    def _ciph(self, block: bytes) -> bytes:
+        enc = Cipher(algorithms.AES(self._key), modes.ECB()).encryptor()
+        return enc.update(block) + enc.finalize()
+
+    def _prf(self, data: bytes) -> bytes:
+        # CBC-MAC with a zero IV: the last block of AES-CBC (data is a multiple of 16 bytes)
+        enc = Cipher(algorithms.AES(self._key), modes.CBC(bytes(16))).encryptor()
+        return (enc.update(data) + enc.finalize())[-16:]
+
+    def _str(self, x: int, m: int) -> str:
+        out = []
+        for _ in range(m):
+            x, r = divmod(x, self.radix)
+            out.append(ALPHABET[r])
+        return "".join(reversed(out))
+
+    def _feistel(self, X: str, tweak: bytes, decrypt: bool) -> str:
+        radix, n, t = self.radix, len(X), len(tweak)
+        if n < 2 or radix**n < 1_000_000:
+            raise ValueError("FF1 domain too small: need radix**len >= 1,000,000")
+        if any(c not in ALPHABET[:radix] for c in X):
+            raise ValueError(f"input must use the first {radix} characters of {ALPHABET!r}")
+
+        u, v = n // 2, n - n // 2
+        A, B = X[:u], X[u:]
+        b = -(-(radix**v - 1).bit_length() // 8)  # ceil(ceil(v * log2(radix)) / 8)
+        d = 4 * -(-b // 4) + 4
+        P = (bytes([1, 2, 1]) + radix.to_bytes(3, "big") + bytes([10, u % 256])
+             + n.to_bytes(4, "big") + t.to_bytes(4, "big"))
+
+        for i in (range(9, -1, -1) if decrypt else range(10)):
+            m = u if i % 2 == 0 else v
+            src = A if decrypt else B
+            Q = tweak + bytes((-t - b - 1) % 16) + bytes([i]) + int(src, radix).to_bytes(b, "big")
+            R = self._prf(P + Q)
+            S = R + b"".join(
+                self._ciph((int.from_bytes(R, "big") ^ j).to_bytes(16, "big"))
+                for j in range(1, -(-d // 16))
+            )
+            y = int.from_bytes(S[:d], "big")
+            if decrypt:
+                B, A = A, self._str((int(B, radix) - y) % radix**m, m)
+            else:
+                A, B = B, self._str((int(A, radix) + y) % radix**m, m)
+        return A + B
+
+    def encrypt(self, plaintext: str, tweak: bytes = b"") -> str:
+        return self._feistel(plaintext, tweak, decrypt=False)
+
+    def decrypt(self, ciphertext: str, tweak: bytes = b"") -> str:
+        return self._feistel(ciphertext, tweak, decrypt=True)
 
 
 class FF1Radix10Cipher:
     """
-    10-Round Format-Preserving Feistel Cipher over Z_{10^4} x Z_{10^5}
-    with AES-256 + HMAC-SHA256 Pseudo-Random Function (PRF) and Tweak.
+    Tokenizes 16-digit Luhn-valid PANs with FF1 (AES-256) over the 9 digits between the
+    6-digit BIN and the check digit.
     """
 
-    def __init__(self, key: bytes, rounds: int = 10) -> None:
+    def __init__(self, key: bytes) -> None:
         if len(key) != 32:
             raise ValueError("FF1Radix10Cipher requires a 32-byte (256-bit) key")
-        if rounds < 8 or rounds % 2 != 0:
-            raise ValueError("Feistel rounds must be an even integer >= 8")
-        self._key = bytes(key)
-        self.rounds = rounds
-        # Derive distinct AES-256 and HMAC subkeys via SHA-256 domain separation
-        self._aes_key = hashlib.sha256(b"FF1-AES-SUBKEY:" + self._key).digest()
-        self._hmac_key = hashlib.sha256(b"FF1-MAC-SUBKEY:" + self._key).digest()
-        self._aes_cipher = Cipher(algorithms.AES(self._aes_key), modes.ECB())
+        self._ff1 = FF1(key, radix=10)
 
-    def _round_prf(self, tweak_bytes: bytes, round_idx: int, half_val: int) -> int:
-        """
-        Cryptographic round function F_K(tweak, round_idx, half_val).
-        Combines a single-block AES-256-ECB encryption of the round state
-        with an HMAC-SHA256 digest over the arbitrary-length tweak.
-        """
-        tweak_digest = hashlib.sha256(tweak_bytes).digest()[:8]
-        block = struct.pack(">BBHI8s", 0x01, round_idx, 10, half_val, tweak_digest)
-        encryptor = self._aes_cipher.encryptor()
-        aes_out = encryptor.update(block) + encryptor.finalize()
-        mac = hmac.new(
-            self._hmac_key,
-            aes_out + struct.pack(">BI", round_idx, half_val) + tweak_bytes,
-            hashlib.sha256,
-        ).digest()
-        return int.from_bytes(mac[:8], "big")
-
-    def encrypt_middle_9(
-        self, payload_9: str, tweak: str = "default"
-    ) -> Tuple[str, List[FeistelRoundTrace]]:
-        """
-        Encrypt a 9-digit decimal string bijectively into a 9-digit decimal string
-        using a 10-round alternating Feistel network over Z_{10^4} x Z_{10^5}.
-        """
+    def encrypt_middle_9(self, payload_9: str, tweak: str = "default") -> str:
+        """Encrypt a 9-digit decimal string to another 9-digit decimal string."""
         if len(payload_9) != 9 or not payload_9.isdigit():
             raise ValueError(f"payload_9 must be 9 decimal digits, got {payload_9!r}")
-
-        left = int(payload_9[:4])   # in Z_{10^4}
-        right = int(payload_9[4:])  # in Z_{10^5}
-        tweak_bytes = tweak.encode("utf-8")
-        traces: List[FeistelRoundTrace] = []
-
-        for r in range(self.rounds):
-            if r % 2 == 0:
-                f_val = self._round_prf(tweak_bytes, r, right)
-                left = (left + f_val) % MOD_LEFT
-            else:
-                f_val = self._round_prf(tweak_bytes, r, left)
-                right = (right + f_val) % MOD_RIGHT
-            traces.append(
-                FeistelRoundTrace(
-                    round_index=r,
-                    left_4=f"{left:04d}",
-                    right_5=f"{right:05d}",
-                    prf_output=f_val,
-                )
-            )
-
-        return f"{left:04d}{right:05d}", traces
+        return self._ff1.encrypt(payload_9, tweak.encode("utf-8"))
 
     def decrypt_middle_9(self, cipher_9: str, tweak: str = "default") -> str:
-        """
-        Invert the 10-round alternating Feistel network on a 9-digit ciphertext.
-        """
+        """Invert encrypt_middle_9."""
         if len(cipher_9) != 9 or not cipher_9.isdigit():
             raise ValueError(f"cipher_9 must be 9 decimal digits, got {cipher_9!r}")
-
-        left = int(cipher_9[:4])   # in Z_{10^4}
-        right = int(cipher_9[4:])  # in Z_{10^5}
-        tweak_bytes = tweak.encode("utf-8")
-
-        for r in range(self.rounds - 1, -1, -1):
-            if r % 2 == 1:
-                f_val = self._round_prf(tweak_bytes, r, left)
-                right = (right - f_val) % MOD_RIGHT
-            else:
-                f_val = self._round_prf(tweak_bytes, r, right)
-                left = (left - f_val) % MOD_LEFT
-
-        return f"{left:04d}{right:05d}"
+        return self._ff1.decrypt(cipher_9, tweak.encode("utf-8"))
 
     def encrypt_pan(self, pan: str, tweak: str = "default") -> str:
         """
@@ -201,16 +174,12 @@ class FF1Radix10Cipher:
         """
         clean_pan = pan.replace(" ", "").replace("-", "")
         if not verify_luhn(clean_pan):
-            raise ValueError(f"Input PAN {clean_pan!r} is not a valid 16-digit Luhn card number")
+            raise ValueError("Input PAN is not a valid 16-digit Luhn card number")
 
         bin_prefix = clean_pan[:6]
-        payload_9 = clean_pan[6:15]
-        effective_tweak = f"BIN:{bin_prefix}|TWEAK:{tweak}"
-
-        cipher_9, _ = self.encrypt_middle_9(payload_9, effective_tweak)
+        cipher_9 = self.encrypt_middle_9(clean_pan[6:15], f"BIN:{bin_prefix}|TWEAK:{tweak}")
         token_first_15 = bin_prefix + cipher_9
-        token_check = compute_luhn_check_digit(token_first_15)
-        return token_first_15 + token_check
+        return token_first_15 + compute_luhn_check_digit(token_first_15)
 
     def decrypt_token(self, token: str, tweak: str = "default") -> str:
         """
@@ -219,52 +188,9 @@ class FF1Radix10Cipher:
         """
         clean_token = token.replace(" ", "").replace("-", "")
         if not verify_luhn(clean_token):
-            raise ValueError(f"Input token {clean_token!r} failed Luhn integrity check")
+            raise ValueError("Input token failed Luhn integrity check")
 
         bin_prefix = clean_token[:6]
-        cipher_9 = clean_token[6:15]
-        effective_tweak = f"BIN:{bin_prefix}|TWEAK:{tweak}"
-
-        payload_9 = self.decrypt_middle_9(cipher_9, effective_tweak)
+        payload_9 = self.decrypt_middle_9(clean_token[6:15], f"BIN:{bin_prefix}|TWEAK:{tweak}")
         pan_first_15 = bin_prefix + payload_9
-        orig_check = compute_luhn_check_digit(pan_first_15)
-        return pan_first_15 + orig_check
-
-    def encrypt_pan_with_trace(self, pan: str, tweak: str = "default") -> Dict[str, object]:
-        """
-        Encrypt a 16-digit Luhn-valid PAN and return detailed round-by-round
-        Feistel diagnostics for auditing and UI inspection.
-        """
-        clean_pan = pan.replace(" ", "").replace("-", "")
-        if not verify_luhn(clean_pan):
-            raise ValueError(f"Input PAN {clean_pan!r} is not a valid 16-digit Luhn card number")
-
-        bin_prefix = clean_pan[:6]
-        payload_9 = clean_pan[6:15]
-        effective_tweak = f"BIN:{bin_prefix}|TWEAK:{tweak}"
-
-        cipher_9, traces = self.encrypt_middle_9(payload_9, effective_tweak)
-        token_first_15 = bin_prefix + cipher_9
-        token_check = compute_luhn_check_digit(token_first_15)
-        token = token_first_15 + token_check
-
-        return {
-            "bin_prefix": bin_prefix,
-            "network": detect_card_network(clean_pan),
-            "original_middle_9": payload_9,
-            "encrypted_middle_9": cipher_9,
-            "original_luhn_digit": clean_pan[15],
-            "token_luhn_digit": token_check,
-            "token": token,
-            "token_luhn_valid": verify_luhn(token),
-            "effective_tweak": effective_tweak,
-            "rounds": [
-                {
-                    "round": t.round_index + 1,
-                    "left_4": t.left_4,
-                    "right_5": t.right_5,
-                    "prf_mod": t.prf_output % (MOD_LEFT if t.round_index % 2 == 0 else MOD_RIGHT),
-                }
-                for t in traces
-            ],
-        }
+        return pan_first_15 + compute_luhn_check_digit(pan_first_15)

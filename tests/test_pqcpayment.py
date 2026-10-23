@@ -17,8 +17,8 @@ from fastapi.testclient import TestClient
 from pqcpayment.api import app
 from pqcpayment.bench import run_benchmark
 from pqcpayment.fpe import (
+    FF1,
     FF1Radix10Cipher,
-    compute_luhn_check_digit,
     detect_card_network,
     generate_luhn_pan,
     verify_luhn,
@@ -53,7 +53,7 @@ def test_luhn_generation_and_validation() -> None:
 
 def test_ff1_feistel_bijection_and_tweak_separation() -> None:
     key = hashlib.sha256(b"UNIT-TEST-FF1-KEY").digest()
-    cipher = FF1Radix10Cipher(key, rounds=10)
+    cipher = FF1Radix10Cipher(key)
 
     pan = generate_luhn_pan("453201", 51128303)
     tok_m1 = cipher.encrypt_pan(pan, tweak="MERCH-A")
@@ -68,6 +68,41 @@ def test_ff1_feistel_bijection_and_tweak_separation() -> None:
 
     assert cipher.decrypt_token(tok_m1, tweak="MERCH-A") == pan
     assert cipher.decrypt_token(tok_m2, tweak="MERCH-B") == pan
+
+
+# NIST SP 800-38G FF1 samples (csrc.nist.gov, "FF1samples.pdf"): key, radix, plaintext, tweak, ciphertext
+K128 = "2B7E151628AED2A6ABF7158809CF4F3C"
+K192 = K128 + "EF4359D8D580AA4F"
+K256 = K192 + "7F036D6F04FC6A94"
+T10 = "39383736353433323130"
+T36 = "3737373770717273373737"
+NIST_FF1_SAMPLES = [
+    (K128, 10, "0123456789", "", "2433477484"),
+    (K128, 10, "0123456789", T10, "6124200773"),
+    (K128, 36, "0123456789abcdefghi", T36, "a9tv40mll9kdu509eum"),
+    (K192, 10, "0123456789", "", "2830668132"),
+    (K192, 10, "0123456789", T10, "2496655549"),
+    (K192, 36, "0123456789abcdefghi", T36, "xbj3kv35jrawxv32ysr"),
+    (K256, 10, "0123456789", "", "6657667009"),
+    (K256, 10, "0123456789", T10, "1001623463"),
+    (K256, 36, "0123456789abcdefghi", T36, "xs8a0azh2avyalyzuwd"),
+]
+
+
+@pytest.mark.parametrize("key, radix, pt, tweak, ct", NIST_FF1_SAMPLES)
+def test_ff1_matches_nist_samples(key: str, radix: int, pt: str, tweak: str, ct: str) -> None:
+    ff1 = FF1(bytes.fromhex(key), radix)
+    assert ff1.encrypt(pt, bytes.fromhex(tweak)) == ct
+    assert ff1.decrypt(ct, bytes.fromhex(tweak)) == pt
+
+
+def test_ff1_rejects_small_domains_and_bad_numerals() -> None:
+    ff1 = FF1(bytes(32), 10)
+    with pytest.raises(ValueError):
+        ff1.encrypt("12345")  # 10^5 < 10^6, below the SP 800-38G minimum
+    for bad in ("12345678a", "1_2345678", " 12345678", "-12345678"):
+        with pytest.raises(ValueError):
+            ff1.encrypt(bad)
 
 
 def test_negacyclic_polynomial_ring_arithmetic() -> None:
