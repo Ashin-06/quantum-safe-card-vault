@@ -1,11 +1,14 @@
 """
-Comprehensive Benchmark & Cryptographic Verification Suite for pqcpayment:
-  - 1,000 Luhn-valid PANs across Visa, Mastercard, and RuPay BINs
-  - 100% Bijective FF1-Feistel Encryption/Decryption (0 collisions, 100% exact recovery)
-  - 100% Luhn Checksum Preservation & BIN Prefix Preservation
-  - 100% Hybrid Module-LWE (n=256, q=3329) + X25519 KEM Handshake Accuracy
-  - 100% Fujisaki-Okamoto (FO) CCA2 Implicit Rejection on Tampered Ciphertexts
-  - Zero-Downtime HSM Key Rotation & Hash-Chained Audit Log Verification
+Consistency benchmark for pqcpayment, on generated card numbers.
+
+Checks that the implementation keeps the properties its construction promises:
+  - FF1 tokenization of N generated PANs (3 sample BINs): no collisions, exact
+    decryption, Luhn-valid tokens, BIN kept. FF1 is a permutation, so anything
+    else would be a bug; correctness against the standard is the NIST-vector test.
+  - Hybrid KEM: encapsulate/decapsulate agree, and a one-bit flip in the lattice
+    ciphertext is rejected. That is a smoke test, not evidence of CCA security.
+  - Vault: 12 cards tokenized, keys rotated, old tokens still resolve, audit chain verifies.
+Timings are single-threaded Python on whatever machine runs it.
 """
 
 from __future__ import annotations
@@ -146,7 +149,7 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
             "per_card_decrypt_ms": round(t_fpe_dec_ms / num_pans, 4),
         },
         "pqc_hybrid_kem": {
-            "ring_parameters": "R_q = Z_3329[X]/(X^256 + 1), k=2, eta=2 + X25519",
+            "ring_parameters": "R_q = Z_3329[X]/(X^256 + 1), k=2, eta=2 (not ML-KEM) + X25519",
             "trials": kem_trials,
             "valid_handshakes": kem_success,
             "handshake_accuracy_rate": round(kem_success / kem_trials, 6),
