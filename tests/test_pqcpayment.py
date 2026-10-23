@@ -241,6 +241,17 @@ def test_audit_log_cannot_be_rewritten_without_the_key() -> None:
     assert vault.verify_audit_log()["valid"] is False
 
 
+def test_dukpt_counter_never_wraps() -> None:
+    vault = QuantumSafeHSMVault()
+    pan = generate_luhn_pan("453201", 77)
+    vault.tx_counter = 0x1FFFFF - 1
+    assert vault.tokenize(pan, merchant_id="M")["dukpt"]["counter"] == 0x1FFFFF
+    with pytest.raises(ValueError, match="exhausted"):
+        vault.tokenize(pan, merchant_id="M")
+    vault.rotate_epoch()
+    assert vault.tokenize(pan, merchant_id="M")["dukpt"]["counter"] == 1
+
+
 def test_vault_keys_are_random_unless_seeded() -> None:
     pan = generate_luhn_pan("453201", 100001)
     tokens = {QuantumSafeHSMVault().tokenize(pan, merchant_id="M")["token"] for _ in range(3)}

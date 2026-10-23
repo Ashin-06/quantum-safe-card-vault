@@ -290,6 +290,9 @@ class QuantumSafeHSMVault:
             raise ValueError("PAN is not a valid 16-digit Luhn card number")
 
         bundle = self.epochs[self.active_epoch]
+        if self.tx_counter >= COUNTER_MASK_21BIT:
+            # format_ksn masks the counter to 21 bits, so going on would reuse KSNs and keys
+            raise ValueError("DUKPT counter exhausted for this epoch; rotate keys")
         self.tx_counter += 1
         ksn = DUKPTKeyEngine.format_ksn(terminal_id, self.tx_counter)
         dukpt_tx = DUKPTKeyEngine.derive_transaction_key(bundle.bdk, ksn)
@@ -449,6 +452,7 @@ class QuantumSafeHSMVault:
 
         new_epoch = old_epoch + 1
         new_bundle = self._initialize_epoch(epoch_num=new_epoch, reason=reason)
+        self.tx_counter = 0  # new BDK, so KSN counters can start again
 
         unique_records = {rec.record_id: rec for rec in self.records_by_token.values()}
         rewrapped_count = 0
