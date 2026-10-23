@@ -152,6 +152,15 @@ def test_hybrid_pqc_kem_and_fo_cca2_tamper_rejection() -> None:
     assert res_bad.cca2_rejected is True
     assert res_bad.shared_secret != ss_sender
 
+    # X25519 ignores bit 255 of a public key, so a re-encoded ephemeral key is a different
+    # ciphertext with the same X25519 secret; the combiner must still give a different key
+    epk = bytearray(ct.x25519_epk_bytes)
+    epk[31] ^= 0x80
+    recoded = HybridCiphertext(lwe_ct=ct.lwe_ct, x25519_epk_bytes=bytes(epk))
+    res_recoded = HybridPQCKEM.decapsulate(kp, recoded)
+    assert res_recoded.x25519_shared_secret == res_ok.x25519_shared_secret
+    assert res_recoded.shared_secret != ss_sender
+
     # Test envelope wrapping and unwrapping
     env = HybridPQCKEM.wrap_envelope(kp.public_key, b"SECRET-PAN-4532015112830366", aad=b"EPOCH:1")
     unwrapped = HybridPQCKEM.unwrap_envelope(kp, env, aad=b"EPOCH:1")

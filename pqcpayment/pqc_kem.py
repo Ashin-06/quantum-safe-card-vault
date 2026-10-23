@@ -1,15 +1,21 @@
 """
-Module/Ring-LWE Post-Quantum Key Encapsulation Mechanism (ML-KEM / FIPS 203 inspired)
-+ Classical X25519 Hybrid Combiner with Fujisaki-Okamoto (FO) CCA2 Transform.
+Hybrid KEM: a hand-written Module-LWE KEM combined with X25519.
 
-Cryptographic Parameters:
--------------------------
-- Ring: R_q = Z_q[X] / (X^n + 1) with n = 256, q = 3329 (NIST FIPS 203 ML-KEM prime)
-- Module rank: k = 2 (512 lattice dimensions, ML-KEM-512 geometry)
-- Noise distribution: Centered Binomial Distribution CBD_eta with eta = 2
-- CCA2 Security: Fujisaki-Okamoto (FO) transform with deterministic re-encryption
-  and implicit rejection key derivation (SHAKE-256(z || H(ct))) on tampered ciphertexts
-- Hybrid Combiner: HKDF-SHA256(ss_lwe || ss_x25519 || SHA256(pk_lwe || pk_x25519))
+The lattice part is NOT ML-KEM (FIPS 203). It borrows ML-KEM's ring and modulus
+(R_q = Z_3329[X]/(X^256 + 1), rank k = 2, CBD noise with eta = 2, a Fujisaki-Okamoto
+transform with implicit rejection), but it has no NTT, no ciphertext compression and
+its own encodings, so it can't be checked against FIPS 203 test vectors, isn't
+interoperable, and its concrete security has not been analysed. It is a teaching
+implementation in Python, not constant-time and not reviewed.
+
+The X25519 half comes from `cryptography`. The combiner derives the key with
+HKDF-SHA256 over ss_lwe || ss_x25519 || X25519 ephemeral key || X25519 recipient key,
+in the style of X-Wing (but not the X-Wing spec). Binding the X25519 public values
+matters: X25519 ignores bit 255 of a public key, so without them two different
+ciphertexts decapsulated to the same key. ss_lwe already depends on H(lwe_ct).
+
+The hybrid is only as strong as X25519 if the lattice part turns out to be weak; a
+real deployment would use ML-KEM-768 from a vetted library.
 """
 
 from __future__ import annotations
@@ -59,8 +65,8 @@ def poly_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def sample_uniform_poly(seed: bytes, i: int, j: int) -> np.ndarray:
     """
-    Rejection-sample a uniform polynomial in R_q from SHAKE-128(seed || j || i),
-    following NIST FIPS 203 SampleNTT semantics.
+    Rejection-sample a uniform polynomial in R_q from SHAKE-128(seed || j || i)
+    (the same parsing as FIPS 203 SampleNTT, though here it's used outside the NTT domain).
     """
     shake = hashlib.shake_128(seed + bytes([j, i]))
     buf = shake.digest(840)  # Ample bytes for 256 rejection-sampled coefficients < 3329
@@ -216,8 +222,8 @@ class DecapsulationResult:
 
 class ModuleLWEKEM:
     """
-    IND-CCA2 Module-LWE Key Encapsulation Mechanism over R_3329 = Z_3329[X]/(X^256 + 1)
-    with Fujisaki-Okamoto (FO) deterministic re-encryption and implicit rejection.
+    Module-LWE KEM over R_3329 = Z_3329[X]/(X^256 + 1) with a Fujisaki-Okamoto transform
+    (deterministic re-encryption, implicit rejection). Not ML-KEM; see the module docstring.
     """
 
     @staticmethod
@@ -375,8 +381,8 @@ class ModuleLWEKEM:
 
 class HybridPQCKEM:
     """
-    Post-Quantum Hybrid Key Encapsulation Combiner pairing Module-LWE (n=256, q=3329)
-    with Classical X25519 ECDH via HKDF-SHA256(ss_lwe || ss_x25519 || pk_hash).
+    Hybrid KEM pairing the Module-LWE KEM above with X25519 ECDH; the combiner binds both
+    shared secrets and the X25519 public values.
     """
 
     @classmethod
@@ -399,16 +405,20 @@ class HybridPQCKEM:
 
     @staticmethod
     def _combine_secrets(
-        ss_lwe: bytes, ss_x25519: bytes, pk_bytes: bytes, context: bytes = b"HYBRID-KEM-VALID"
+        ss_lwe: bytes,
+        ss_x25519: bytes,
+        x25519_epk: bytes,
+        recipient_pk: HybridPublicKey,
+        context: bytes = b"HYBRID-KEM-VALID",
     ) -> bytes:
-        pk_digest = hashlib.sha256(pk_bytes).digest()
+        pk_digest = hashlib.sha256(recipient_pk.to_bytes()).digest()
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=pk_digest,
-            info=b"PQCPAYMENT-MLKEM-X25519:" + context,
+            info=b"PQCPAYMENT-LWE-X25519:" + context,
         )
-        return hkdf.derive(ss_lwe + ss_x25519 + pk_digest)
+        return hkdf.derive(ss_lwe + ss_x25519 + x25519_epk + recipient_pk.x25519_pk_bytes)
 
     @classmethod
     def encapsulate(
@@ -429,7 +439,7 @@ class HybridPQCKEM:
         peer_x_pk = x25519.X25519PublicKey.from_public_bytes(hybrid_pk.x25519_pk_bytes)
         ss_x25519 = eph_sk.exchange(peer_x_pk)
 
-        ss_hybrid = cls._combine_secrets(ss_lwe, ss_x25519, hybrid_pk.to_bytes())
+        ss_hybrid = cls._combine_secrets(ss_lwe, ss_x25519, eph_pk_bytes, hybrid_pk)
         ct = HybridCiphertext(lwe_ct=lwe_ct, x25519_epk_bytes=eph_pk_bytes)
         meta = {
             "ss_lwe_hex": ss_lwe.hex(),
@@ -449,17 +459,17 @@ class HybridPQCKEM:
         peer_eph_pk = x25519.X25519PublicKey.from_public_bytes(hybrid_ct.x25519_epk_bytes)
         ss_x25519 = keypair.x25519_sk.exchange(peer_eph_pk)
 
+        epk = hybrid_ct.x25519_epk_bytes
         if cca2_valid:
-            ss_hybrid = cls._combine_secrets(
-                ss_lwe, ss_x25519, keypair.public_key.to_bytes(), context=b"HYBRID-KEM-VALID"
-            )
+            ss_hybrid = cls._combine_secrets(ss_lwe, ss_x25519, epk, keypair.public_key)
         else:
             # Implicit rejection propagates into the hybrid combiner so tampered
             # ciphertexts never yield the sender's shared secret
             ss_hybrid = cls._combine_secrets(
                 ss_lwe,
                 hashlib.sha256(keypair.lwe_sk.z_reject + hybrid_ct.to_bytes()).digest(),
-                keypair.public_key.to_bytes(),
+                epk,
+                keypair.public_key,
                 context=b"HYBRID-KEM-IMPLICIT-REJECT",
             )
 
