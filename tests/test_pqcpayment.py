@@ -310,3 +310,36 @@ def test_fastapi_endpoints() -> None:
     )
     assert r_detok_after.status_code == 200
     assert r_detok_after.json()["pan"] == pan
+
+
+def test_api_key_limits_and_no_pan_in_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pqcpayment.api as api_mod
+
+    client = TestClient(app)
+    pan = generate_luhn_pan("453201", 424242)
+
+    monkeypatch.setattr(api_mod, "API_KEY", "s3cret")
+    assert client.post("/tokenize", json={"pan": pan}).status_code == 401
+    assert client.post("/detokenize", json={"token": pan}, headers={"X-API-Key": "nope"}).status_code == 401
+    assert client.get("/hsm/status").status_code == 401
+    assert client.get("/health").status_code == 200
+    r = client.post("/tokenize", json={"pan": pan, "merchant_id": "M-KEY"}, headers={"X-API-Key": "s3cret"})
+    assert r.status_code == 200
+    monkeypatch.setattr(api_mod, "API_KEY", None)
+
+    # Validation errors must not echo the card number back
+    r = client.post("/tokenize", json={"pan": pan + "x"})
+    assert r.status_code == 422 and pan not in r.text
+    r = client.post("/tokenize", json={"pan": pan[:-1] + str((int(pan[-1]) + 1) % 10)})
+    assert r.status_code == 400 and pan[:-1] not in r.text
+    assert client.post("/tokenize", json={"pan": pan, "merchant_id": "<script>"}).status_code == 422
+    assert client.post("/tokenize", content=b"x" * (api_mod.MAX_BODY_BYTES + 1)).status_code == 413
+
+    # Another merchant, or a token never issued, gets nothing
+    token = client.post("/tokenize", json={"pan": pan, "merchant_id": "M-A"}).json()["token"]
+    assert client.post("/detokenize", json={"token": token, "merchant_id": "M-B"}).status_code == 404
+    assert client.post("/detokenize", json={"token": generate_luhn_pan("453201", 1), "merchant_id": "M-A"}).status_code == 404
+    assert client.post("/detokenize", json={"token": token, "merchant_id": "M-A"}).json()["pan"] == pan
+
+    monkeypatch.setattr(api_mod, "MAX_EPOCHS", len(api_mod.VAULT.epochs))
+    assert client.post("/hsm/rotate", json={}).status_code == 409
