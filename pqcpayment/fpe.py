@@ -63,20 +63,23 @@ def generate_luhn_pan(bin_prefix: str = "453201", account_seq: int = 1) -> str:
 
 def detect_card_network(pan: str) -> str:
     """
-    Identify payment network from the 6-digit BIN prefix.
+    Best-guess payment network from the leading digits. RuPay and Discover share the
+    60/65 ranges, so telling them apart for sure needs a BIN table; this checks the
+    Discover-specific prefixes first.
     """
     if len(pan) < 6 or not pan[:6].isdigit():
         return "UNKNOWN"
     b2 = int(pan[:2])
+    b3 = int(pan[:3])
     b4 = int(pan[:4])
     if pan.startswith("4"):
         return "VISA"
     if 51 <= b2 <= 55 or 2221 <= b4 <= 2720:
         return "MASTERCARD"
+    if pan.startswith("6011") or 644 <= b3 <= 649:
+        return "DISCOVER"
     if b2 in (60, 65, 81, 82) or pan.startswith("508"):
         return "RUPAY"
-    if pan.startswith("6011") or pan.startswith("64"):
-        return "DISCOVER"
     return "ISO8583_GENERIC"
 
 

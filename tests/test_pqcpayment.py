@@ -44,6 +44,7 @@ def test_luhn_generation_and_validation() -> None:
     assert detect_card_network(pan) == "VISA"
     assert detect_card_network(generate_luhn_pan("541275", 42)) == "MASTERCARD"
     assert detect_card_network(generate_luhn_pan("607094", 42)) == "RUPAY"
+    assert detect_card_network(generate_luhn_pan("601100", 42)) == "DISCOVER"
 
     # Flip last digit and confirm Luhn failure
     bad_last = str((int(pan[-1]) + 1) % 10)
