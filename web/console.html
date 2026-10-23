@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pqcpayment // Quantum-Safe Card Vault & Bijective FF1 Tokenizer</title>
+  <style>
+    :root {
+      --bg: #070b14;
+      --panel: #0f1626;
+      --border: #1e2d4a;
+      --accent: #38bdf8;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --rose: #f43f5e;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(circle at top right, #0f2042 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+    header {
+      max-width: 1320px;
+      margin: 0 auto 24px auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .title-block h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      letter-spacing: -0.02em;
+    }
+    .title-block p {
+      margin: 6px 0 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .grid {
+      max-width: 1320px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      gap: 20px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    }
+    .card h2 {
+      margin: 0 0 12px 0;
+      font-size: 1.08rem;
+      color: var(--accent);
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+    input, select {
+      width: 100%;
+      padding: 9px 11px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #080d18;
+      color: var(--text);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.9rem;
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    button {
+      cursor: pointer;
+      padding: 9px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      background: rgba(56, 189, 248, 0.16);
+      color: var(--text);
+      font-weight: 600;
+      font-size: 0.84rem;
+      transition: all 0.15s ease;
+    }
+    button:hover {
+      background: rgba(56, 189, 248, 0.28);
+    }
+    button.danger {
+      border-color: rgba(244, 63, 94, 0.5);
+      background: rgba(244, 63, 94, 0.16);
+    }
+    pre {
+      background: #050811;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 0.78rem;
+      overflow-x: auto;
+      color: #a7f3d0;
+      max-height: 290px;
+      margin-top: 14px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title-block">
+      <h1>pqcpayment // Quantum-Safe Card Vault &amp; FF1-Feistel Tokenizer</h1>
+      <p>Module-LWE (n=256, q=3329) + X25519 Hybrid KEM &bull; Bijective Luhn-Preserving FF1 &bull; DUKPT &amp; Zero-Downtime HSM Rotation</p>
+    </div>
+    <div>
+      <span class="badge" id="epochBadge">HSM EPOCH: 1</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>1. Bijective Luhn-Preserving FF1-Feistel Tokenization</h2>
+      <label>16-Digit Luhn-Valid Card Number (PAN)</label>
+      <input id="panInput" value="4532015112830366" />
+      <label>Merchant / Domain Tweak</label>
+      <input id="merchantInput" value="MERCH-GLOBAL-01" />
+      <div class="btn-row">
+        <button onclick="tokenizeCard()">Tokenize PAN (FF1 + PQC Envelope)</button>
+        <button onclick="detokenizeCard()">Detokenize Token</button>
+      </div>
+      <label>Latest 16-Digit Luhn-Valid Token</label>
+      <input id="tokenInput" placeholder="Token will appear here..." />
+      <pre id="fpeOutput">Ready. Click "Tokenize PAN" to run 10-round Feistel over Z_10^4 x Z_10^5.</pre>
+    </div>
+
+    <div class="card">
+      <h2>2. Hybrid Module-LWE (q=3329) + X25519 KEM &amp; FO-CCA2 Guard</h2>
+      <p style="font-size:0.83rem;color:var(--muted);margin-top:0;">
+        Tests polynomial ring R_q = Z_3329[X]/(X^256+1) encapsulation combined with X25519 ECDH and Fujisaki-Okamoto deterministic re-encryption.
+      </p>
+      <div class="btn-row">
+        <button onclick="runKemHandshake(false)">Valid Hybrid PQC Handshake</button>
+        <button class="danger" onclick="runKemHandshake(true)">Inject 1-Bit Tamper (FO-CCA2 Reject)</button>
+      </div>
+      <pre id="kemOutput">Click a handshake button to inspect shared secrets and CCA2 verification.</pre>
+    </div>
+
+    <div class="card">
+      <h2>3. Zero-Downtime HSM Epoch Rotation &amp; Hash-Chained Audit Log</h2>
+      <label>Rotation Audit Reason</label>
+      <input id="rotateReason" value="Scheduled NIST FIPS 203 Key Lifecycle Rotation" />
+      <div class="btn-row">
+        <button onclick="rotateHsmEpoch()">Rotate HSM Master Keys (Epoch E &rarr; E+1)</button>
+        <button onclick="refreshHsmStatus()">Refresh Audit Chain</button>
+      </div>
+      <pre id="hsmOutput">Loading HSM status...</pre>
+    </div>
+
+    <div class="card">
+      <h2>4. 1,000-Card Bijection + PQC-KEM Verification Suite</h2>
+      <p style="font-size:0.83rem;color:var(--muted);margin-top:0;">
+        Verifies 0 collisions, 100% Luhn validity, 100% exact decryption across 1,000 Visa/Mastercard/RuPay PANs, and 100% FO-CCA2 tamper rejection.
+      </p>
+      <div class="btn-row">
+        <button onclick="runBenchSuite()">Run 1,000-PAN + PQC-KEM Benchmark</button>
+      </div>
+      <pre id="benchOutput">Click "Run 1,000-PAN + PQC-KEM Benchmark" to execute live cryptographic checks.</pre>
+    </div>
+  </div>
+
+  <script>
+    async function tokenizeCard() {
+      const pan = document.getElementById('panInput').value;
+      const merchant_id = document.getElementById('merchantInput').value;
+      const res = await fetch('/tokenize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pan, merchant_id })
+      });
+      const data = await res.json();
+      if (data.token) {
+        document.getElementById('tokenInput').value = data.token;
+      }
+      document.getElementById('fpeOutput').textContent = JSON.stringify(data, null, 2);
+      refreshHsmStatus();
+    }
+
+    async function detokenizeCard() {
+      const token = document.getElementById('tokenInput').value;
+      const merchant_id = document.getElementById('merchantInput').value;
+      const res = await fetch('/detokenize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, merchant_id })
+      });
+      const data = await res.json();
+      document.getElementById('fpeOutput').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function runKemHandshake(tamper) {
+      const res = await fetch('/kem/handshake', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tamper_ciphertext: tamper })
+      });
+      const data = await res.json();
+      document.getElementById('kemOutput').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function rotateHsmEpoch() {
+      const reason = document.getElementById('rotateReason').value;
+      const res = await fetch('/hsm/rotate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      });
+      const data = await res.json();
+      document.getElementById('hsmOutput').textContent = JSON.stringify(data, null, 2);
+      if (data.active_epoch) {
+        document.getElementById('epochBadge').textContent = 'HSM EPOCH: ' + data.active_epoch;
+      }
+    }
+
+    async function refreshHsmStatus() {
+      const res = await fetch('/hsm/status');
+      const data = await res.json();
+      document.getElementById('hsmOutput').textContent = JSON.stringify(data, null, 2);
+      if (data.active_epoch) {
+        document.getElementById('epochBadge').textContent = 'HSM EPOCH: ' + data.active_epoch;
+      }
+    }
+
+    async function runBenchSuite() {
+      document.getElementById('benchOutput').textContent = 'Running 1,000-PAN FF1 + PQC-KEM benchmark...';
+      const res = await fetch('/bench?num_pans=1000&kem_trials=50');
+      const data = await res.json();
+      document.getElementById('benchOutput').textContent = JSON.stringify(data, null, 2);
+    }
+
+    refreshHsmStatus();
+  </script>
+</body>
+</html>
