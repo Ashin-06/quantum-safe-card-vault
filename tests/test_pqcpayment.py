@@ -9,6 +9,7 @@ Comprehensive test suite for pqcpayment:
 from __future__ import annotations
 
 import hashlib
+import json
 
 import numpy as np
 import pytest
@@ -205,6 +206,22 @@ def test_detokenize_is_scoped_to_issued_tokens_and_merchant() -> None:
     vault._index(rec_b)
     assert vault.records_by_token[("MERCH-A", token)] is rec_b
     assert token not in rec_a.legacy_tokens
+
+
+def test_audit_log_cannot_be_rewritten_without_the_key() -> None:
+    vault = QuantumSafeHSMVault()
+    vault.tokenize(generate_luhn_pan("453201", 1234), merchant_id="M")
+    assert vault.verify_audit_log()["valid"] is True
+
+    # Edit an entry and recompute every hash the way an unkeyed SHA-256 chain would allow
+    vault.audit_log[1].details["merchant_id"] = "SOMEONE-ELSE"
+    prev = "0" * 64
+    for e in vault.audit_log:
+        e.prev_hash = prev
+        body = {"seq": e.seq, "timestamp": e.timestamp, "action": e.action,
+                "epoch": e.epoch, "details": e.details, "prev_hash": e.prev_hash}
+        e.entry_hash = prev = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    assert vault.verify_audit_log()["valid"] is False
 
 
 def test_vault_keys_are_random_unless_seeded() -> None:

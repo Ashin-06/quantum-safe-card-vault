@@ -188,6 +188,11 @@ class QuantumSafeHSMVault:
         # initial_seed makes every key reproducible, for tests only. Without it each epoch
         # gets fresh random keys, so one epoch's keys say nothing about another's.
         self._seed = initial_seed
+        # Audit entries are HMAC-chained: a plain hash chain can be rewritten and re-hashed
+        # by anyone who can edit the log, a keyed one only by someone holding this key
+        self._audit_key = (
+            hashlib.sha256(b"AUDIT-MAC:" + initial_seed).digest() if initial_seed else os.urandom(32)
+        )
         self.epochs: Dict[int, EpochKeyBundle] = {}
         self.active_epoch: int = 0
         self.tx_counter: int = 0
@@ -213,7 +218,7 @@ class QuantumSafeHSMVault:
             },
             sort_keys=True,
         ).encode("utf-8")
-        entry_hash = hashlib.sha256(payload).hexdigest()
+        entry_hash = hmac.new(self._audit_key, payload, hashlib.sha256).hexdigest()
         entry = AuditLogEntry(
             seq=seq,
             timestamp=timestamp,
@@ -508,7 +513,7 @@ class QuantumSafeHSMVault:
 
     def verify_audit_log(self) -> Dict[str, object]:
         """
-        Verify the cryptographic integrity of the SHA-256 hash-chained audit log.
+        Verify the HMAC-SHA256 chain over the audit log (needs this vault's audit key).
         """
         prev = "0" * 64
         for entry in self.audit_log:
@@ -525,7 +530,7 @@ class QuantumSafeHSMVault:
                 },
                 sort_keys=True,
             ).encode("utf-8")
-            expected_hash = hashlib.sha256(payload).hexdigest()
+            expected_hash = hmac.new(self._audit_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(expected_hash, entry.entry_hash):
                 return {"valid": False, "failed_seq": entry.seq}
             prev = entry.entry_hash
