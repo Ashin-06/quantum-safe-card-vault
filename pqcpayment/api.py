@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
-
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -42,8 +40,7 @@ class TokenizeRequest(BaseModel):
 
 class DetokenizeRequest(BaseModel):
     token: str = Field(..., description="16-digit Luhn-valid FF1 token")
-    merchant_id: str = Field(default="MERCH-GLOBAL-01", description="Merchant / domain tweak")
-    epoch: Optional[int] = Field(default=None, description="Optional explicit key epoch")
+    merchant_id: str = Field(default="MERCH-GLOBAL-01", description="Merchant the token was issued to")
 
 
 class KEMHandshakeRequest(BaseModel):
@@ -94,11 +91,7 @@ def post_tokenize(req: TokenizeRequest) -> dict:
 @app.post("/detokenize")
 def post_detokenize(req: DetokenizeRequest) -> dict:
     try:
-        return VAULT.detokenize(
-            token=req.token,
-            merchant_id=req.merchant_id,
-            epoch=req.epoch,
-        )
+        return VAULT.detokenize(token=req.token, merchant_id=req.merchant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

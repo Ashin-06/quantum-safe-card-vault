@@ -183,6 +183,30 @@ def test_dukpt_key_isolation_and_hsm_zero_downtime_rotation() -> None:
     assert vault.detokenize(tok2_epoch1, merchant_id="MERCH-01")["pan"] == pan2
 
 
+def test_detokenize_is_scoped_to_issued_tokens_and_merchant() -> None:
+    vault = QuantumSafeHSMVault()
+    pan = generate_luhn_pan("453201", 5555)
+    token = vault.tokenize(pan, merchant_id="MERCH-A")["token"]
+    assert vault.detokenize(token, merchant_id="MERCH-A")["pan"] == pan
+
+    with pytest.raises(ValueError, match="Unknown token"):
+        vault.detokenize(token, merchant_id="MERCH-B")
+    with pytest.raises(ValueError, match="Unknown token"):
+        vault.detokenize(generate_luhn_pan("453201", 999), merchant_id="MERCH-A")  # never issued
+
+    # A new token equal to an older epoch's token for another card takes over that value,
+    # and the old card's stale legacy entry is dropped rather than left pointing at it
+    vault.rotate_epoch()
+    rec_a = vault.records_by_token[("MERCH-A", token)]
+    assert token in rec_a.legacy_tokens
+    vault.tokenize(generate_luhn_pan("453201", 6666), merchant_id="MERCH-A")
+    rec_b = next(r for k, r in vault.records_by_token.items() if r is not rec_a)
+    rec_b.token = token
+    vault._index(rec_b)
+    assert vault.records_by_token[("MERCH-A", token)] is rec_b
+    assert token not in rec_a.legacy_tokens
+
+
 def test_vault_keys_are_random_unless_seeded() -> None:
     pan = generate_luhn_pan("453201", 100001)
     tokens = {QuantumSafeHSMVault().tokenize(pan, merchant_id="M")["token"] for _ in range(3)}

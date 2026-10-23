@@ -5,15 +5,16 @@ and Zero-Downtime Epoch Key Rotation Engine with Tamper-Evident Hash-Chained Aud
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import os
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pqcpayment.fpe import (
     FF1Radix10Cipher,
@@ -190,7 +191,9 @@ class QuantumSafeHSMVault:
         self.epochs: Dict[int, EpochKeyBundle] = {}
         self.active_epoch: int = 0
         self.tx_counter: int = 0
-        self.records_by_token: Dict[str, VaultRecord] = {}
+        # Keyed by (merchant_id, token): tokens are only meaningful under the merchant's tweak,
+        # and two merchants' tokens for different cards can be equal
+        self.records_by_token: Dict[Tuple[str, str], VaultRecord] = {}
         self.audit_log: List[AuditLogEntry] = []
 
         self._initialize_epoch(epoch_num=1, reason="HSM Genesis Provisioning")
@@ -276,7 +279,7 @@ class QuantumSafeHSMVault:
         t0 = time.perf_counter()
         clean_pan = pan.replace(" ", "").replace("-", "")
         if not verify_luhn(clean_pan):
-            raise ValueError(f"PAN {clean_pan!r} is not a valid 16-digit Luhn card number")
+            raise ValueError("PAN is not a valid 16-digit Luhn card number")
 
         bundle = self.epochs[self.active_epoch]
         self.tx_counter += 1
@@ -322,7 +325,7 @@ class QuantumSafeHSMVault:
             tx_mac_hex=tx_mac,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        self.records_by_token[token] = record
+        self._index(record)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         self._append_audit(
@@ -357,73 +360,56 @@ class QuantumSafeHSMVault:
             "pqc_envelope": {
                 "pk_fingerprint": pqc_envelope["pk_fingerprint"],
                 "aes_nonce_hex": pqc_envelope["aes_nonce_hex"],
-                "kem_ciphertext_bytes": len(
-                    HybridPQCKEM.keygen(seed=b"0" * 64).public_key.to_bytes()
-                ),
+                "kem_ciphertext_bytes": len(base64.b64decode(pqc_envelope["kem_ciphertext_b64"])),
             },
             "latency_ms": round(elapsed_ms, 3),
         }
 
-    def detokenize(
-        self,
-        token: str,
-        merchant_id: str = "MERCH-GLOBAL-01",
-        epoch: Optional[int] = None,
-    ) -> Dict[str, object]:
+    def _index(self, rec: VaultRecord) -> None:
+        key = (rec.merchant_id, rec.token)
+        other = self.records_by_token.get(key)
+        if other is not None and other is not rec and rec.token in other.legacy_tokens:
+            # A new token can equal an older epoch's token for a different card. The new one
+            # wins, and the stale legacy token stops resolving instead of returning the wrong card.
+            other.legacy_tokens.remove(rec.token)
+        self.records_by_token[key] = rec
+
+    def detokenize(self, token: str, merchant_id: str) -> Dict[str, object]:
         """
-        Detokenize a 16-digit Luhn-valid token back to the original 16-digit PAN.
-        Supports both vault-backed dual verification (FF1 inverse + Hybrid PQC-KEM
-        envelope decapsulation) and stateless FF1 detokenization.
+        Return the PAN for a token this vault issued to `merchant_id` (in the current epoch,
+        or an earlier one if the token predates a rotation). The PAN comes from the KEM
+        envelope; for a current token it must also equal the FF1 inverse.
         """
         t0 = time.perf_counter()
         clean_token = token.replace(" ", "").replace("-", "")
-        if not verify_luhn(clean_token):
-            raise ValueError(f"Token {clean_token!r} failed Luhn check")
+        record = self.records_by_token.get((merchant_id, clean_token))
+        if record is None:
+            # FF1 is a permutation, so an unissued token would still "decrypt" to a
+            # plausible PAN; only answer for tokens on record for this merchant
+            raise ValueError("Unknown token for this merchant")
 
-        record = self.records_by_token.get(clean_token)
-        target_epoch = epoch or (record.epoch if record is not None else self.active_epoch)
-        if target_epoch not in self.epochs:
-            raise ValueError(f"Unknown key epoch {target_epoch}")
-
-        bundle = self.epochs[target_epoch]
-        eff_merchant = record.merchant_id if record is not None else merchant_id
-
-        # If token was issued under a prior epoch and rotated, resolve the epoch it was minted in
-        if record is not None and clean_token in record.legacy_tokens:
-            # Unwrap envelope from current record epoch to recover exact PAN even for legacy token
-            aad = self._build_aad(record.epoch, record.merchant_id, record.ksn)
-            active_bundle = self.epochs[record.epoch]
-            unwrapped = json.loads(
-                HybridPQCKEM.unwrap_envelope(
-                    active_bundle.hybrid_keypair, record.pqc_envelope, aad=aad
-                ).decode("utf-8")
-            )
-            recovered_pan = str(unwrapped["pan"])
-            pqc_verified = True
-        else:
-            tweak = self._build_tweak(target_epoch, eff_merchant)
-            recovered_pan = bundle.fpe_cipher.decrypt_token(clean_token, tweak=tweak)
-            pqc_verified = False
-            if record is not None:
-                aad = self._build_aad(record.epoch, record.merchant_id, record.ksn)
-                rec_bundle = self.epochs[record.epoch]
-                unwrapped = json.loads(
-                    HybridPQCKEM.unwrap_envelope(
-                        rec_bundle.hybrid_keypair, record.pqc_envelope, aad=aad
-                    ).decode("utf-8")
-                )
-                if unwrapped["pan"] != recovered_pan:
-                    raise ValueError("Vault integrity mismatch between FF1 inverse and PQC envelope")
-                pqc_verified = True
+        aad = self._build_aad(record.epoch, record.merchant_id, record.ksn)
+        unwrapped = json.loads(
+            HybridPQCKEM.unwrap_envelope(
+                self.epochs[record.epoch].hybrid_keypair, record.pqc_envelope, aad=aad
+            ).decode("utf-8")
+        )
+        recovered_pan = str(unwrapped["pan"])
+        is_legacy = clean_token != record.token
+        if not is_legacy:
+            tweak = self._build_tweak(record.epoch, merchant_id)
+            fpe_pan = self.epochs[record.epoch].fpe_cipher.decrypt_token(clean_token, tweak=tweak)
+            if not hmac.compare_digest(fpe_pan, recovered_pan):
+                raise ValueError("Vault integrity mismatch between FF1 inverse and PQC envelope")
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         self._append_audit(
             action="DETOKENIZE_TOKEN",
-            epoch=target_epoch,
+            epoch=record.epoch,
             details={
                 "token_masked": f"{clean_token[:6]}******{clean_token[-4:]}",
-                "merchant_id": eff_merchant,
-                "pqc_envelope_verified": pqc_verified,
+                "merchant_id": merchant_id,
+                "legacy_token": is_legacy,
             },
         )
 
@@ -433,9 +419,9 @@ class QuantumSafeHSMVault:
             "pan_luhn_valid": verify_luhn(recovered_pan),
             "bin_prefix": recovered_pan[:6],
             "network": detect_card_network(recovered_pan),
-            "merchant_id": eff_merchant,
-            "epoch": target_epoch,
-            "pqc_envelope_verified": pqc_verified,
+            "merchant_id": merchant_id,
+            "epoch": record.epoch,
+            "legacy_token": is_legacy,
             "latency_ms": round(elapsed_ms, 3),
         }
 
@@ -487,8 +473,12 @@ class QuantumSafeHSMVault:
             rec.epoch = new_epoch
             rec.pqc_envelope = new_envelope
             rec.rotated_at = datetime.now(timezone.utc).isoformat()
-            self.records_by_token[new_token] = rec
             rewrapped_count += 1
+
+        # Index new tokens only after every record has moved its old token to legacy_tokens,
+        # so _index sees all of them when a new token collides with an old one
+        for rec in unique_records.values():
+            self._index(rec)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         audit_entry = self._append_audit(
