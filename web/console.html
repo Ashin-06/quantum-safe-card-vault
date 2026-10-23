@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pqcpayment // Quantum-Safe Card Vault & Bijective FF1 Tokenizer</title>
+  <title>pqcpayment // Card Vault</title>
   <style>
     :root {
       --bg: #070b14;
@@ -130,19 +130,20 @@
 <body>
   <header>
     <div class="title-block">
-      <h1>pqcpayment // Quantum-Safe Card Vault &amp; FF1-Feistel Tokenizer</h1>
-      <p>Module-LWE (n=256, q=3329) + X25519 Hybrid KEM &bull; Bijective Luhn-Preserving FF1 &bull; DUKPT &amp; Zero-Downtime HSM Rotation</p>
+      <h1>pqcpayment // Card Vault (reference implementation)</h1>
+      <p>FF1 (NIST SP 800-38G) tokens &bull; hand-written Module-LWE (not ML-KEM) + X25519 hybrid KEM &bull; DUKPT-style keys &bull; key rotation &bull; test card numbers only</p>
     </div>
     <div>
-      <span class="badge" id="epochBadge">HSM EPOCH: 1</span>
+      <input type="password" id="apiKey" placeholder="X-API-Key (if set)" autocomplete="off" style="width:200px;margin:0 8px 0 0;" />
+      <span class="badge" id="epochBadge">KEY EPOCH: 1</span>
     </div>
   </header>
 
   <div class="grid">
     <div class="card">
-      <h2>1. Bijective Luhn-Preserving FF1-Feistel Tokenization</h2>
+      <h2>1. Luhn-Preserving FF1 Tokenization</h2>
       <label>16-Digit Luhn-Valid Card Number (PAN)</label>
-      <input id="panInput" value="4532015112830366" />
+      <input id="panInput" value="4111111111111111" />
       <label>Merchant / Domain Tweak</label>
       <input id="merchantInput" value="MERCH-GLOBAL-01" />
       <div class="btn-row">
@@ -151,45 +152,52 @@
       </div>
       <label>Latest 16-Digit Luhn-Valid Token</label>
       <input id="tokenInput" placeholder="Token will appear here..." />
-      <pre id="fpeOutput">Ready. Click "Tokenize PAN" to run 10-round Feistel over Z_10^4 x Z_10^5.</pre>
+      <pre id="fpeOutput">Ready. FF1 (AES-256, radix 10) encrypts the 9 digits between the BIN and the check digit.</pre>
     </div>
 
     <div class="card">
-      <h2>2. Hybrid Module-LWE (q=3329) + X25519 KEM &amp; FO-CCA2 Guard</h2>
+      <h2>2. Hybrid Module-LWE + X25519 KEM</h2>
       <p style="font-size:0.83rem;color:var(--muted);margin-top:0;">
-        Tests polynomial ring R_q = Z_3329[X]/(X^256+1) encapsulation combined with X25519 ECDH and Fujisaki-Okamoto deterministic re-encryption.
+        A throwaway encapsulation to the vault's key. The lattice half uses ML-KEM's ring R_q = Z_3329[X]/(X^256+1) but is not ML-KEM (no NTT, no compression, unreviewed).
       </p>
       <div class="btn-row">
-        <button onclick="runKemHandshake(false)">Valid Hybrid PQC Handshake</button>
-        <button class="danger" onclick="runKemHandshake(true)">Inject 1-Bit Tamper (FO-CCA2 Reject)</button>
+        <button onclick="runKemHandshake(false)">Encapsulate / Decapsulate</button>
+        <button class="danger" onclick="runKemHandshake(true)">Flip 1 Bit (should be rejected)</button>
       </div>
-      <pre id="kemOutput">Click a handshake button to inspect shared secrets and CCA2 verification.</pre>
+      <pre id="kemOutput">Click a handshake button to see the shared secrets and whether decapsulation accepted the ciphertext.</pre>
     </div>
 
     <div class="card">
-      <h2>3. Zero-Downtime HSM Epoch Rotation &amp; Hash-Chained Audit Log</h2>
+      <h2>3. Epoch Key Rotation &amp; HMAC-Chained Audit Log</h2>
       <label>Rotation Audit Reason</label>
-      <input id="rotateReason" value="Scheduled NIST FIPS 203 Key Lifecycle Rotation" />
+      <input id="rotateReason" value="Scheduled key rotation" />
       <div class="btn-row">
-        <button onclick="rotateHsmEpoch()">Rotate HSM Master Keys (Epoch E &rarr; E+1)</button>
+        <button onclick="rotateHsmEpoch()">Rotate Keys (Epoch E &rarr; E+1)</button>
         <button onclick="refreshHsmStatus()">Refresh Audit Chain</button>
       </div>
-      <pre id="hsmOutput">Loading HSM status...</pre>
+      <pre id="hsmOutput">Loading vault status...</pre>
     </div>
 
     <div class="card">
-      <h2>4. 1,000-Card Bijection + PQC-KEM Verification Suite</h2>
+      <h2>4. Consistency Benchmark</h2>
       <p style="font-size:0.83rem;color:var(--muted);margin-top:0;">
-        Verifies 0 collisions, 100% Luhn validity, 100% exact decryption across 1,000 Visa/Mastercard/RuPay PANs, and 100% FO-CCA2 tamper rejection.
+        Round-trips 1,000 generated card numbers through FF1 and 50 KEM encapsulations, then rotates a 12-card vault. Checks the code keeps its own invariants; it doesn't prove security.
       </p>
       <div class="btn-row">
-        <button onclick="runBenchSuite()">Run 1,000-PAN + PQC-KEM Benchmark</button>
+        <button onclick="runBenchSuite()">Run Benchmark</button>
       </div>
-      <pre id="benchOutput">Click "Run 1,000-PAN + PQC-KEM Benchmark" to execute live cryptographic checks.</pre>
+      <pre id="benchOutput">Click "Run Benchmark" to run the checks.</pre>
     </div>
   </div>
 
   <script>
+    // Send the API key (if one is entered) with every request this page makes
+    const _fetch = window.fetch.bind(window);
+    window.fetch = (url, opts = {}) => {
+      const key = document.getElementById('apiKey').value;
+      return key ? _fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'X-API-Key': key } }) : _fetch(url, opts);
+    };
+
     async function tokenizeCard() {
       const pan = document.getElementById('panInput').value;
       const merchant_id = document.getElementById('merchantInput').value;
@@ -238,21 +246,22 @@
       const data = await res.json();
       document.getElementById('hsmOutput').textContent = JSON.stringify(data, null, 2);
       if (data.active_epoch) {
-        document.getElementById('epochBadge').textContent = 'HSM EPOCH: ' + data.active_epoch;
+        document.getElementById('epochBadge').textContent = 'KEY EPOCH: ' + data.active_epoch;
       }
     }
 
     async function refreshHsmStatus() {
       const res = await fetch('/hsm/status');
       const data = await res.json();
-      document.getElementById('hsmOutput').textContent = JSON.stringify(data, null, 2);
+      document.getElementById('hsmOutput').textContent =
+        res.status === 401 ? 'This server needs an API key: enter it above.' : JSON.stringify(data, null, 2);
       if (data.active_epoch) {
-        document.getElementById('epochBadge').textContent = 'HSM EPOCH: ' + data.active_epoch;
+        document.getElementById('epochBadge').textContent = 'KEY EPOCH: ' + data.active_epoch;
       }
     }
 
     async function runBenchSuite() {
-      document.getElementById('benchOutput').textContent = 'Running 1,000-PAN FF1 + PQC-KEM benchmark...';
+      document.getElementById('benchOutput').textContent = 'Running benchmark...';
       const res = await fetch('/bench?num_pans=1000&kem_trials=50');
       const data = await res.json();
       document.getElementById('benchOutput').textContent = JSON.stringify(data, null, 2);
