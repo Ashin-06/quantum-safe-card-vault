@@ -95,7 +95,8 @@ class FF1:
         self.radix = radix
 
     def _ciph(self, block: bytes) -> bytes:
-        enc = Cipher(algorithms.AES(self._key), modes.ECB()).encryptor()
+        # CIPH_K of SP 800-38G: AES on one block, which is what ECB mode does here
+        enc = Cipher(algorithms.AES(self._key), modes.ECB()).encryptor()  # nosec B305
         return enc.update(block) + enc.finalize()
 
     def _prf(self, data: bytes) -> bytes:

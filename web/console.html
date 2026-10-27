@@ -131,7 +131,7 @@
   <header>
     <div class="title-block">
       <h1>pqcpayment // Card Vault (reference implementation)</h1>
-      <p>FF1 (NIST SP 800-38G) tokens &bull; hand-written Module-LWE (not ML-KEM) + X25519 hybrid KEM &bull; DUKPT-style keys &bull; key rotation &bull; test card numbers only</p>
+      <p>FF1 (NIST SP 800-38G) tokens &bull; ML-KEM-768 + X25519 hybrid KEM &bull; DUKPT-style keys &bull; key rotation &bull; test card numbers only</p>
     </div>
     <div>
       <input type="password" id="apiKey" placeholder="X-API-Key (if set)" autocomplete="off" style="width:200px;margin:0 8px 0 0;" />
@@ -156,15 +156,15 @@
     </div>
 
     <div class="card">
-      <h2>2. Hybrid Module-LWE + X25519 KEM</h2>
+      <h2>2. Hybrid ML-KEM-768 + X25519 KEM</h2>
       <p style="font-size:0.83rem;color:var(--muted);margin-top:0;">
-        A throwaway encapsulation to the vault's key. The lattice half uses ML-KEM's ring R_q = Z_3329[X]/(X^256+1) but is not ML-KEM (no NTT, no compression, unreviewed).
+        A throwaway encapsulation to the vault's key. ML-KEM-768 and X25519 come from pyca cryptography; the combiner is written here and is not the X-Wing spec.
       </p>
       <div class="btn-row">
         <button onclick="runKemHandshake(false)">Encapsulate / Decapsulate</button>
-        <button class="danger" onclick="runKemHandshake(true)">Flip 1 Bit (should be rejected)</button>
+        <button class="danger" onclick="runKemHandshake(true)">Flip 1 Bit (keys should differ)</button>
       </div>
-      <pre id="kemOutput">Click a handshake button to see the shared secrets and whether decapsulation accepted the ciphertext.</pre>
+      <pre id="kemOutput">Click a handshake button to see the shared secrets and whether both sides got the same key. A flipped bit gives an unrelated key (ML-KEM implicit rejection).</pre>
     </div>
 
     <div class="card">

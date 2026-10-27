@@ -1,7 +1,8 @@
 """
 CLI entry point for pqcpayment:
   python -m pqcpayment bench
-  python -m pqcpayment serve --port 8020
+  python -m pqcpayment serve      (settings: PQCPAYMENT_* environment variables, see ops.py)
+  python -m pqcpayment migrate    (apply database migrations to PQCPAYMENT_DATABASE_URL and exit)
 """
 
 from __future__ import annotations
@@ -11,33 +12,47 @@ import json
 import os
 import sys
 
-import uvicorn
 
-from pqcpayment.bench import run_benchmark
-
-
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pqcpayment",
-        description="Card vault reference implementation: FF1 tokens, hybrid lattice + X25519 KEM envelopes",
+        description="Card vault reference implementation: FF1 tokens, ML-KEM-768 + X25519 envelopes",
     )
     sub = parser.add_subparsers(dest="command")
 
     bench_p = sub.add_parser("bench", help="Run the FF1 + hybrid KEM consistency benchmark")
     bench_p.add_argument("--pans", type=int, default=1000, help="Number of Luhn-valid PANs to test")
-    bench_p.add_argument("--kem-trials", type=int, default=50, help="Number of PQC-KEM + CCA2 trials")
+    bench_p.add_argument("--kem-trials", type=int, default=50, help="Number of KEM round trips and tamper checks")
 
     serve_p = sub.add_parser("serve", help="Start FastAPI server and interactive web console")
-    serve_p.add_argument("--host", type=str, default="127.0.0.1", help="Bind host")
-    serve_p.add_argument("--port", type=int, default=8020, help="Bind port (default: 8020)")
+    serve_p.add_argument("--host", help="default PQCPAYMENT_HOST or 127.0.0.1; any other address needs API keys")
+    serve_p.add_argument("--port", type=int, help="default PQCPAYMENT_PORT or 8020")
+    sub.add_parser("migrate", help="apply database migrations to PQCPAYMENT_DATABASE_URL")
 
-    args = parser.parse_args()
-    if args.command == "serve":
-        if args.host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("PQCPAYMENT_API_KEY"):
-            print("Refusing to listen on a non-loopback address without PQCPAYMENT_API_KEY set.", file=sys.stderr)
-            return 2
-        uvicorn.run("pqcpayment.api:app", host=args.host, port=args.port, reload=False)
+    args = parser.parse_args(argv)
+    if args.command == "migrate":
+        from pqcpayment import db, ops
+
+        applied = db.migrate(db.engine(ops.load_settings().database_url))
+        print(*(applied or ["up to date"]), sep="\n")
         return 0
+    if args.command == "serve":
+        import uvicorn
+
+        from pqcpayment import ops
+
+        for name, val in (("HOST", args.host), ("PORT", args.port)):
+            if val is not None:
+                os.environ[f"PQCPAYMENT_{name}"] = str(val)
+        try:
+            settings = ops.load_settings()  # fail here, before uvicorn, with a readable message
+        except ops.ConfigError as e:
+            sys.exit(f"configuration error: {e}")
+        ops.setup_logging(settings.log_level)
+        uvicorn.run("pqcpayment.api:app", host=settings.host, port=settings.port, log_config=None, access_log=False)
+        return 0
+
+    from pqcpayment.bench import run_benchmark
 
     # Default or "bench": run benchmark suite
     num_pans = getattr(args, "pans", 1000)

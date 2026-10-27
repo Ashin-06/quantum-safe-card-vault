@@ -1,7 +1,7 @@
 """
 Comprehensive test suite for pqcpayment:
   - Bijective Luhn-Preserving FF1-Feistel Format-Preserving Encryption
-  - Module-LWE (n=256, q=3329) + X25519 Hybrid PQC-KEM & FO-CCA2 Transform
+  - ML-KEM-768 + X25519 hybrid KEM and its combiner
   - DUKPT Per-Transaction Key Derivation & Zero-Downtime HSM Key Rotation
   - FastAPI Endpoints & 1,000-Card Benchmark Invariants
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 
-import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -25,16 +24,7 @@ from pqcpayment.fpe import (
     verify_luhn,
 )
 from pqcpayment.hsm import DUKPTKeyEngine, QuantumSafeHSMVault
-from pqcpayment.pqc_kem import (
-    HybridCiphertext,
-    HybridPQCKEM,
-    ModuleLWECiphertext,
-    N_DEGREE,
-    Q_PRIME,
-    poly_add,
-    poly_mul,
-    poly_sub,
-)
+from pqcpayment.pqc_kem import MLKEM768_CT_BYTES, MLKEM768_PK_BYTES, HybridCiphertext, HybridKeyPair, HybridPQCKEM
 
 
 def test_luhn_generation_and_validation() -> None:
@@ -107,64 +97,39 @@ def test_ff1_rejects_small_domains_and_bad_numerals() -> None:
             ff1.encrypt(bad)
 
 
-def test_negacyclic_polynomial_ring_arithmetic() -> None:
-    # Verify X^256 == -1 == 3328 (mod X^256 + 1, 3329)
-    x_pow_1 = np.zeros(N_DEGREE, dtype=np.int64)
-    x_pow_1[1] = 1
-    x_pow_255 = np.zeros(N_DEGREE, dtype=np.int64)
-    x_pow_255[255] = 1
-
-    prod = poly_mul(x_pow_1, x_pow_255)
-    assert prod[0] == Q_PRIME - 1  # -1 mod 3329
-    assert np.all(prod[1:] == 0)
-
-    # Verify distributivity: a * (b + c) == a*b + a*c mod (X^256 + 1, 3329)
-    rng = np.random.default_rng(2026)
-    a = rng.integers(0, Q_PRIME, size=N_DEGREE, dtype=np.int64)
-    b = rng.integers(0, Q_PRIME, size=N_DEGREE, dtype=np.int64)
-    c = rng.integers(0, Q_PRIME, size=N_DEGREE, dtype=np.int64)
-
-    lhs = poly_mul(a, poly_add(b, c))
-    rhs = poly_add(poly_mul(a, b), poly_mul(a, c))
-    assert np.array_equal(lhs, rhs)
-    assert np.array_equal(poly_sub(lhs, rhs), np.zeros(N_DEGREE, dtype=np.int64))
-
-
-def test_hybrid_pqc_kem_and_fo_cca2_tamper_rejection() -> None:
+def test_hybrid_kem_round_trip_and_tamper_rejection() -> None:
     kp = HybridPQCKEM.keygen(seed=b"TEST-PQC-KEM-SEED-2026" * 3)
     ct, ss_sender, meta = HybridPQCKEM.encapsulate(kp.public_key)
 
-    res_ok = HybridPQCKEM.decapsulate(kp, ct)
-    assert res_ok.cca2_valid is True
-    assert res_ok.cca2_rejected is False
-    assert res_ok.shared_secret == ss_sender
-    assert len(res_ok.shared_secret) == 32
+    assert len(kp.public_key.mlkem_pk_bytes) == MLKEM768_PK_BYTES and len(ct.mlkem_ct) == MLKEM768_CT_BYTES  # FIPS 203 sizes
+    assert int(meta["ciphertext_bytes"]) == MLKEM768_CT_BYTES + 32
+    assert HybridPQCKEM.decapsulate(kp, ct) == ss_sender and len(ss_sender) == 32
+    assert HybridPQCKEM.keygen(seed=b"TEST-PQC-KEM-SEED-2026" * 3).public_key == kp.public_key  # seeded = reproducible
+    assert HybridPQCKEM.keygen().public_key != HybridPQCKEM.keygen().public_key
 
-    # Flip 1 bit in Module-LWE ciphertext u -> must trigger FO-CCA2 implicit rejection
-    u_tampered = bytearray(ct.lwe_ct.u_bytes)
-    u_tampered[10] ^= 0x04
-    bad_ct = HybridCiphertext(
-        lwe_ct=ModuleLWECiphertext(u_bytes=bytes(u_tampered), v_bytes=ct.lwe_ct.v_bytes),
-        x25519_epk_bytes=ct.x25519_epk_bytes,
-    )
-    res_bad = HybridPQCKEM.decapsulate(kp, bad_ct)
-    assert res_bad.cca2_valid is False
-    assert res_bad.cca2_rejected is True
-    assert res_bad.shared_secret != ss_sender
+    # Flip 1 bit in the ML-KEM ciphertext: implicit rejection gives an unrelated key
+    raw = bytearray(ct.mlkem_ct)
+    raw[10] ^= 0x04
+    assert HybridPQCKEM.decapsulate(kp, HybridCiphertext(bytes(raw), ct.x25519_epk_bytes)) != ss_sender
 
     # X25519 ignores bit 255 of a public key, so a re-encoded ephemeral key is a different
     # ciphertext with the same X25519 secret; the combiner must still give a different key
     epk = bytearray(ct.x25519_epk_bytes)
     epk[31] ^= 0x80
-    recoded = HybridCiphertext(lwe_ct=ct.lwe_ct, x25519_epk_bytes=bytes(epk))
-    res_recoded = HybridPQCKEM.decapsulate(kp, recoded)
-    assert res_recoded.x25519_shared_secret == res_ok.x25519_shared_secret
-    assert res_recoded.shared_secret != ss_sender
+    assert HybridPQCKEM.decapsulate(kp, HybridCiphertext(ct.mlkem_ct, bytes(epk))) != ss_sender
 
-    # Test envelope wrapping and unwrapping
+    # Private keys survive a round trip through bytes (that is how they are sealed and stored)
+    again = HybridKeyPair.from_private_bytes(kp.private_bytes())
+    assert again.public_key == kp.public_key and HybridPQCKEM.decapsulate(again, ct) == ss_sender
+
+    # Envelope wrapping and unwrapping; tampering or the wrong AAD fails to open
     env = HybridPQCKEM.wrap_envelope(kp.public_key, b"SECRET-PAN-4532015112830366", aad=b"EPOCH:1")
-    unwrapped = HybridPQCKEM.unwrap_envelope(kp, env, aad=b"EPOCH:1")
-    assert unwrapped == b"SECRET-PAN-4532015112830366"
+    assert HybridPQCKEM.unwrap_envelope(kp, env, aad=b"EPOCH:1") == b"SECRET-PAN-4532015112830366"
+    with pytest.raises(ValueError, match="failed to open"):
+        HybridPQCKEM.unwrap_envelope(kp, env, aad=b"EPOCH:2")
+    bad = HybridCiphertext(bytes(raw), ct.x25519_epk_bytes).to_b64()
+    with pytest.raises(ValueError, match="failed to open"):
+        HybridPQCKEM.unwrap_envelope(kp, {**env, "kem_ciphertext_b64": bad}, aad=b"EPOCH:1")
 
 
 def test_dukpt_key_isolation_and_hsm_zero_downtime_rotation() -> None:
@@ -215,14 +180,15 @@ def test_detokenize_is_scoped_to_issued_tokens_and_merchant() -> None:
     # A new token equal to an older epoch's token for another card takes over that value,
     # and the old card's stale legacy entry is dropped rather than left pointing at it
     vault.rotate_epoch()
-    rec_a = vault.records_by_token[("MERCH-A", token)]
-    assert token in rec_a.legacy_tokens
-    vault.tokenize(generate_luhn_pan("453201", 6666), merchant_id="MERCH-A")
-    rec_b = next(r for k, r in vault.records_by_token.items() if r is not rec_a)
-    rec_b.token = token
-    vault._index(rec_b)
-    assert vault.records_by_token[("MERCH-A", token)] is rec_b
-    assert token not in rec_a.legacy_tokens
+    assert vault.detokenize(token, merchant_id="MERCH-A")["legacy_token"] is True
+    rec_b = vault.tokenize(generate_luhn_pan("453201", 6666), merchant_id="MERCH-A")["record_id"]
+    from sqlalchemy import text
+
+    with vault.db.begin() as c:  # force the collision: card B's new token equals card A's old one
+        vault._index(c, "MERCH-A", token, rec_b)
+        rows = c.execute(text("SELECT record_id, legacy FROM tokens WHERE merchant_id = 'MERCH-A' AND token = :t"),
+                         {"t": token}).all()
+    assert [tuple(r) for r in rows] == [(rec_b, 0)]  # one entry, now card B's; A's stale alias is gone
 
 
 def test_audit_log_cannot_be_rewritten_without_the_key() -> None:
@@ -230,14 +196,18 @@ def test_audit_log_cannot_be_rewritten_without_the_key() -> None:
     vault.tokenize(generate_luhn_pan("453201", 1234), merchant_id="M")
     assert vault.verify_audit_log()["valid"] is True
 
-    # Edit an entry and recompute every hash the way an unkeyed SHA-256 chain would allow
-    vault.audit_log[1].details["merchant_id"] = "SOMEONE-ELSE"
-    prev = "0" * 64
-    for e in vault.audit_log:
-        e.prev_hash = prev
-        body = {"seq": e.seq, "timestamp": e.timestamp, "action": e.action,
-                "epoch": e.epoch, "details": e.details, "prev_hash": e.prev_hash}
-        e.entry_hash = prev = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    # Edit an entry in the database and recompute every hash the way an unkeyed SHA-256 chain would allow
+    from sqlalchemy import text
+
+    with vault.db.begin() as c:
+        rows = [json.loads(r.entry) for r in c.execute(text("SELECT entry FROM audit_log ORDER BY seq"))]
+        rows[1]["details"]["merchant_id"] = "SOMEONE-ELSE"
+        prev = "0" * 64
+        for e in rows:
+            e["prev_hash"] = prev
+            body = {k: e[k] for k in ("seq", "timestamp", "action", "epoch", "details", "prev_hash")}
+            e["entry_hash"] = prev = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+            c.execute(text("UPDATE audit_log SET entry = :e WHERE seq = :s"), {"e": json.dumps(e), "s": e["seq"]})
     assert vault.verify_audit_log()["valid"] is False
 
 
@@ -277,7 +247,7 @@ def test_1000_pan_benchmark_invariants() -> None:
 
     kem = report["pqc_hybrid_kem"]
     assert kem["valid_handshakes"] == 25
-    assert kem["tampered_cca2_rejections"] == 25
+    assert kem["tampered_ciphertexts_rejected"] == 25 and kem["ciphertext_bytes"] == 1120
 
 
 def test_fastapi_endpoints() -> None:
@@ -303,12 +273,10 @@ def test_fastapi_endpoints() -> None:
 
     r_kem_ok = client.post("/kem/handshake", json={"tamper_ciphertext": False})
     assert r_kem_ok.status_code == 200
-    assert r_kem_ok.json()["cca2_valid"] is True
-    assert r_kem_ok.json()["shared_secrets_match"] is True
+    assert r_kem_ok.json()["shared_secrets_match"] is True and r_kem_ok.json()["ciphertext_bytes"] == 1120
 
     r_kem_bad = client.post("/kem/handshake", json={"tamper_ciphertext": True})
     assert r_kem_bad.status_code == 200
-    assert r_kem_bad.json()["cca2_rejected"] is True
     assert r_kem_bad.json()["shared_secrets_match"] is False
 
     r_rot = client.post("/hsm/rotate", json={"reason": "API Test Rotation"})
@@ -324,19 +292,23 @@ def test_fastapi_endpoints() -> None:
 
 
 def test_api_key_limits_and_no_pan_in_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
     import pqcpayment.api as api_mod
 
-    client = TestClient(app)
     pan = generate_luhn_pan("453201", 424242)
-
-    monkeypatch.setattr(api_mod, "API_KEY", "s3cret")
+    monkeypatch.setenv("PQCPAYMENT_API_KEYS", json.dumps({"s3cret": {"user": "t", "role": "admin"}}))
+    api_mod = importlib.reload(api_mod)
+    client = TestClient(api_mod.app)
     assert client.post("/tokenize", json={"pan": pan}).status_code == 401
     assert client.post("/detokenize", json={"token": pan}, headers={"X-API-Key": "nope"}).status_code == 401
     assert client.get("/hsm/status").status_code == 401
-    assert client.get("/health").status_code == 200
+    assert client.get("/healthz").status_code == 200
     r = client.post("/tokenize", json={"pan": pan, "merchant_id": "M-KEY"}, headers={"X-API-Key": "s3cret"})
     assert r.status_code == 200
-    monkeypatch.setattr(api_mod, "API_KEY", None)
+    monkeypatch.delenv("PQCPAYMENT_API_KEYS")
+    api_mod = importlib.reload(api_mod)
+    client = TestClient(api_mod.app)
 
     # Validation errors must not echo the card number back
     r = client.post("/tokenize", json={"pan": pan + "x"})
@@ -344,7 +316,7 @@ def test_api_key_limits_and_no_pan_in_errors(monkeypatch: pytest.MonkeyPatch) ->
     r = client.post("/tokenize", json={"pan": pan[:-1] + str((int(pan[-1]) + 1) % 10)})
     assert r.status_code == 400 and pan[:-1] not in r.text
     assert client.post("/tokenize", json={"pan": pan, "merchant_id": "<script>"}).status_code == 422
-    assert client.post("/tokenize", content=b"x" * (api_mod.MAX_BODY_BYTES + 1)).status_code == 413
+    assert client.post("/tokenize", content=b"x" * (api_mod.settings.max_body_bytes + 1)).status_code == 413
 
     # Another merchant, or a token never issued, gets nothing
     token = client.post("/tokenize", json={"pan": pan, "merchant_id": "M-A"}).json()["token"]
@@ -352,5 +324,5 @@ def test_api_key_limits_and_no_pan_in_errors(monkeypatch: pytest.MonkeyPatch) ->
     assert client.post("/detokenize", json={"token": generate_luhn_pan("453201", 1), "merchant_id": "M-A"}).status_code == 404
     assert client.post("/detokenize", json={"token": token, "merchant_id": "M-A"}).json()["pan"] == pan
 
-    monkeypatch.setattr(api_mod, "MAX_EPOCHS", len(api_mod.VAULT.epochs))
+    monkeypatch.setattr(api_mod, "MAX_EPOCHS", api_mod.VAULT.active_epoch)
     assert client.post("/hsm/rotate", json={}).status_code == 409

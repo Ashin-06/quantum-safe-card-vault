@@ -5,15 +5,15 @@ Checks that the implementation keeps the properties its construction promises:
   - FF1 tokenization of N generated PANs (3 sample BINs): no collisions, exact
     decryption, Luhn-valid tokens, BIN kept. FF1 is a permutation, so anything
     else would be a bug; correctness against the standard is the NIST-vector test.
-  - Hybrid KEM: encapsulate/decapsulate agree, and a one-bit flip in the lattice
-    ciphertext is rejected. That is a smoke test, not evidence of CCA security.
+  - Hybrid KEM (ML-KEM-768 + X25519): encapsulate/decapsulate agree, and a one-bit flip in
+    the ML-KEM ciphertext gives a different key, so an envelope sealed under the real key
+    won't open. That is a smoke test of the wiring; ML-KEM's security is the library's.
   - Vault: 12 cards tokenized, keys rotated, old tokens still resolve, audit chain verifies.
 Timings are single-threaded Python on whatever machine runs it.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import json
 import time
@@ -25,11 +25,7 @@ from pqcpayment.fpe import (
     verify_luhn,
 )
 from pqcpayment.hsm import DUKPTKeyEngine, QuantumSafeHSMVault
-from pqcpayment.pqc_kem import (
-    HybridCiphertext,
-    HybridPQCKEM,
-    ModuleLWECiphertext,
-)
+from pqcpayment.pqc_kem import HybridCiphertext, HybridPQCKEM
 
 ISSUER_BINS = (
     ("453201", "VISA"),
@@ -75,29 +71,23 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
         1 for orig, tok in zip(input_pans, tokens) if orig[:6] == tok[:6]
     )
 
-    # 2. Hybrid Module-LWE (n=256, q=3329) + X25519 KEM & FO-CCA2 Tamper Rejection
+    # 2. Hybrid ML-KEM-768 + X25519: round trips, and implicit rejection of tampered ciphertexts
     t_kem_0 = time.perf_counter()
     kem_success = 0
-    cca2_rejections = 0
+    tamper_rejections = 0
+    ct_bytes = 0
 
     kp = HybridPQCKEM.keygen()
     for trial in range(kem_trials):
-        coins = hashlib.sha256(f"KEM-TRIAL-{trial}".encode("utf-8")).digest()
-        ct, ss_enc, _ = HybridPQCKEM.encapsulate(kp.public_key, coins=coins)
-        res_valid = HybridPQCKEM.decapsulate(kp, ct)
-        if res_valid.cca2_valid and not res_valid.cca2_rejected and res_valid.shared_secret == ss_enc:
+        ct, ss_enc, meta = HybridPQCKEM.encapsulate(kp.public_key)
+        ct_bytes = int(meta["ciphertext_bytes"])
+        if HybridPQCKEM.decapsulate(kp, ct) == ss_enc:
             kem_success += 1
-
-        # Tamper with ciphertext polynomial u or v and verify FO-CCA2 implicit rejection
-        u_raw = bytearray(ct.lwe_ct.u_bytes)
-        u_raw[trial % len(u_raw)] ^= 0x01
-        tampered_ct = HybridCiphertext(
-            lwe_ct=ModuleLWECiphertext(u_bytes=bytes(u_raw), v_bytes=ct.lwe_ct.v_bytes),
-            x25519_epk_bytes=ct.x25519_epk_bytes,
-        )
-        res_tampered = HybridPQCKEM.decapsulate(kp, tampered_ct)
-        if res_tampered.cca2_rejected and res_tampered.shared_secret != ss_enc:
-            cca2_rejections += 1
+        # Flip one bit of the ML-KEM ciphertext: decapsulation must give an unrelated key
+        raw = bytearray(ct.mlkem_ct)
+        raw[trial % len(raw)] ^= 0x01
+        if HybridPQCKEM.decapsulate(kp, HybridCiphertext(bytes(raw), ct.x25519_epk_bytes)) != ss_enc:
+            tamper_rejections += 1
 
     t_kem_ms = (time.perf_counter() - t_kem_0) * 1000.0
 
@@ -109,7 +99,7 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
     working_keys = set()
 
     bdk = vault.epochs[1].bdk
-    for i, card in enumerate(sample_cards):
+    for card in sample_cards:
         res = vault.tokenize(card, merchant_id="MERCH-BENCH-VAULT")
         epoch1_tokens.append(str(res["token"]))
         ksn_str = str(res["dukpt"]["ksn"])
@@ -149,12 +139,13 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
             "per_card_decrypt_ms": round(t_fpe_dec_ms / num_pans, 4),
         },
         "pqc_hybrid_kem": {
-            "ring_parameters": "R_q = Z_3329[X]/(X^256 + 1), k=2, eta=2 (not ML-KEM) + X25519",
+            "kem": "ML-KEM-768 (FIPS 203, pyca cryptography) + X25519",
             "trials": kem_trials,
             "valid_handshakes": kem_success,
             "handshake_accuracy_rate": round(kem_success / kem_trials, 6),
-            "tampered_cca2_rejections": cca2_rejections,
-            "cca2_rejection_rate": round(cca2_rejections / kem_trials, 6),
+            "tampered_ciphertexts_rejected": tamper_rejections,
+            "tamper_rejection_rate": round(tamper_rejections / kem_trials, 6),
+            "ciphertext_bytes": ct_bytes,
             "total_kem_ms": round(t_kem_ms, 3),
             "per_handshake_ms": round(t_kem_ms / kem_trials, 3),
         },
@@ -177,7 +168,7 @@ def run_benchmark(num_pans: int = 1000, kem_trials: int = 50) -> Dict[str, objec
             and luhn_valid_tokens == num_pans
             and bin_preserved_tokens == num_pans
             and kem_success == kem_trials
-            and cca2_rejections == kem_trials
+            and tamper_rejections == kem_trials
             and legacy_recovery_matches == len(sample_cards)
             and bool(audit_check["valid"])
         ),
