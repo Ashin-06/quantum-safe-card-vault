@@ -85,3 +85,7 @@ These are correctness checks on generated card numbers, not security results. Mo
 - It needs a PCI DSS assessment and an independent security review before it holds real card data.
 
 See [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
