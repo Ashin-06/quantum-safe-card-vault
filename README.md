@@ -16,7 +16,7 @@ How FF1, the key exchange and the vault work is described in [docs/design.md](do
 ## Quick start
 
 ```bash
-pip install -r requirements-dev.lock && pip install -e .
+python -m pip install -r requirements-dev.lock && python -m pip install -e .
 python -m pytest -q                        # 49 tests
 python -m pqcpayment bench
 python -m pqcpayment serve                 # API and console on http://127.0.0.1:8020
