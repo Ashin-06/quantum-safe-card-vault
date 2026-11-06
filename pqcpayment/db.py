@@ -46,7 +46,7 @@ def engine(url: str) -> Engine:
 
 def migrate(eng: Engine) -> list[str]:
     """Apply missing migrations in order; returns the files applied.
-    ponytail: two replicas starting at once both try; the loser's transaction fails on the
+    Two replicas starting at once both try; the loser's transaction fails on the
     schema_migrations key and it restarts. Run `migrate` as a deploy step if that matters."""
     with eng.begin() as c:
         c.execute(text("CREATE TABLE IF NOT EXISTS schema_migrations "

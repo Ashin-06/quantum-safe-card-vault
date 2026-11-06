@@ -217,7 +217,7 @@ class QuantumSafeHSMVault:
             audit_key = hashlib.sha256(b"AUDIT-MAC:" + initial_seed).digest() if initial_seed else os.urandom(32)
         self._audit_keys = (audit_key, *previous_audit_keys)
         self._bundles: Dict[int, EpochKeyBundle] = {}  # unsealed keys, by epoch (they never change)
-        self._lock = threading.Lock()  # ponytail: per process; replicas are caught by keys and counter checks
+        self._lock = threading.Lock()  # Per process; replicas are caught by keys and counter checks
         self._tx(lambda c: None if self._active(c) else self._initialize_epoch(c, 1, "HSM Genesis Provisioning"))
 
     # --- plumbing ------------------------------------------------------------------------
@@ -482,7 +482,7 @@ class QuantumSafeHSMVault:
           2. Create epoch E+1 keys (KEM keypair, FF1 key, BDK); its DUKPT counter starts at 0.
           3. Decrypt every record and re-wrap it under E+1 with a new token, keeping the old
              token as a legacy alias so tokens issued before the rotation still resolve.
-        ponytail: one transaction over every record, so the vault is busy for the duration;
+        One transaction over every record, so the vault is busy for the duration;
         rotate in batches if the vault grows large.
         """
         t0 = time.perf_counter()
@@ -541,7 +541,7 @@ class QuantumSafeHSMVault:
         """
         Verify the HMAC-SHA256 chain over the audit log (needs this vault's audit key, or a
         previous one for entries written before a rotation).
-        ponytail: walks the whole log; keep a verified checkpoint if it gets long.
+        Walks the whole log; keep a verified checkpoint if it gets long.
         """
         rows = self._read(lambda c: c.execute(text("SELECT seq, entry FROM audit_log ORDER BY seq")).all())
         prev = "0" * 64

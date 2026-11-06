@@ -222,7 +222,7 @@ def require(permission: str) -> Callable[[Request], dict[str, str]]:
 
 class RateLimiter:
     """Token bucket per client: `per_minute` requests, refilled continuously.
-    ponytail: per process; with several replicas put a shared limiter (Redis, the ingress) in front."""
+    Per process; with several replicas put a shared limiter (Redis, the ingress) in front."""
 
     def __init__(self, per_minute: int):
         self.rate, self.burst = per_minute / 60.0, float(per_minute)
