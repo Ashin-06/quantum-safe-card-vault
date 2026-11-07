@@ -125,7 +125,20 @@
       max-height: 290px;
       margin-top: 14px;
     }
-  </style>
+  
+    /* Keep wide content inside the page at any screen size */
+    *, *::before, *::after { box-sizing: border-box; min-width: 0; }
+    img, svg, canvas, video { max-width: 100%; }
+    input, select, textarea { max-width: 100%; }
+    table, pre { display: block; max-width: 100%; overflow-x: auto; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      [style*="grid-template-columns"], .grid, .grid-2, .grid-3, .grid-4, .kpis, .kpi-grid, .form-row, .row, .cols, main, .layout {
+        grid-template-columns: minmax(0, 1fr) !important;
+      }
+    }
+    .btn-bar, .form-row, .tabs, .tab-group { flex-wrap: wrap; }
+</style>
 </head>
 <body>
   <header>
