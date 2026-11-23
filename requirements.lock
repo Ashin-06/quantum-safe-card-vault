@@ -18,7 +18,7 @@ h11==0.16.0
     # via uvicorn
 idna==3.20
     # via anyio
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
     # via fastapi
 prometheus-client==0.26.0
     # via quantum-safe-card-vault (pyproject.toml)
